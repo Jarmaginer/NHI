@@ -35,6 +35,7 @@ pub enum CliCommand {
         name: String,
     },
     Restore {
+        instance_id: String,
         checkpoint_name: String,
     },
     Cd {
@@ -143,13 +144,14 @@ impl CliCommand {
                 })
             }
             "restore" => {
-                if parts.len() != 2 {
+                if parts.len() != 3 {
                     return Err(CriuCliError::ParseError(
-                        "restore command requires a checkpoint name".to_string(),
+                        "restore command requires instance ID and checkpoint name".to_string(),
                     ));
                 }
                 Ok(CliCommand::Restore {
-                    checkpoint_name: parts[1].to_string(),
+                    instance_id: parts[1].to_string(),
+                    checkpoint_name: parts[2].to_string(),
                 })
             }
             "cd" => {

@@ -13,6 +13,7 @@ mod criu_manager;
 mod types;
 mod ui;
 mod tty_utils;
+mod colors;
 
 use cli::{CliCommand, CliState};
 use instance::InstanceManager;
@@ -21,9 +22,10 @@ use criu_manager::CriuManager;
 use types::*;
 use ui::AttachUI;
 use uuid::Uuid;
+use colors::ColorScheme;
 
 #[derive(Parser)]
-#[command(name = "criu-cli")]
+#[command(name = "nhi")]
 #[command(about = "Interactive CLI for CRIU process management")]
 struct Args {
     #[arg(short, long, default_value = "info")]
@@ -39,7 +41,7 @@ async fn main() -> Result<()> {
         .with_env_filter(&args.log_level)
         .init();
 
-    info!("Starting CRIU CLI");
+    info!("Starting NHI");
 
     // Initialize managers
     let process_manager = Arc::new(ProcessManager::new());
@@ -52,16 +54,16 @@ async fn main() -> Result<()> {
     // Create readline editor
     let mut rl = DefaultEditor::new()?;
 
-    println!("CRIU CLI v0.1.0");
-    println!("Type 'help' for available commands or 'exit' to quit.");
+    println!("{}", ColorScheme::header("NHI v0.1.0"));
+    println!("{}", ColorScheme::info("Type 'help' for available commands or 'exit' to quit."));
 
     loop {
         let prompt = {
             let state = cli_state.lock().await;
             if let Some(instance_id) = &state.attached_instance {
-                format!("criu-cli [{}]> ", instance_id)
+                format!("nhi [{}]> ", instance_id)
             } else {
-                "criu-cli> ".to_string()
+                "nhi> ".to_string()
             }
         };
 
@@ -146,7 +148,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Shutting down CRIU CLI");
+    info!("Shutting down NHI");
     Ok(())
 }
 
@@ -165,7 +167,7 @@ async fn execute_command(
             Ok(false)
         }
         CliCommand::Exit => {
-            println!("Goodbye!");
+            println!("{}", ColorScheme::success("Goodbye!"));
             Ok(true)
         }
         CliCommand::Start { program, args } => {
@@ -175,7 +177,10 @@ async fn execute_command(
                 args,
                 process_manager.clone(),
             ).await?;
-            println!("Started instance: {}", instance_id);
+            println!("{} {}",
+                ColorScheme::success_indicator("Started instance:"),
+                ColorScheme::instance_id(&instance_id)
+            );
             Ok(false)
         }
         CliCommand::StartDetached { program, args } => {
@@ -185,14 +190,24 @@ async fn execute_command(
                 args,
                 process_manager.clone(),
             ).await?;
-            println!("Started detached instance: {} (optimized for CRIU)", instance_id);
-            println!("Note: Detached instances have limited input capabilities but are CRIU-friendly");
+            println!("{} {} {}",
+                ColorScheme::success_indicator("Started detached instance:"),
+                ColorScheme::instance_id(&instance_id),
+                ColorScheme::info("(optimized for CRIU)")
+            );
+            println!("{} {}",
+                ColorScheme::info_indicator("Note:"),
+                ColorScheme::info("Detached instances have limited input capabilities but are CRIU-friendly")
+            );
             Ok(false)
         }
         CliCommand::Stop { instance_id } => {
             let mut manager = instance_manager.lock().await;
             manager.stop_instance(&instance_id, process_manager.clone()).await?;
-            println!("Stopped instance: {}", instance_id);
+            println!("{} {}",
+                ColorScheme::success_indicator("Stopped instance:"),
+                ColorScheme::instance_id(&instance_id)
+            );
             Ok(false)
         }
         CliCommand::Pause { instance_id } => {
@@ -310,17 +325,28 @@ async fn execute_command(
                 criu_manager.clone(),
                 process_manager.clone(),
             ).await?;
-            println!("Created checkpoint '{}' for instance: {}", name, instance_id);
+            println!("{} {} {} {}",
+                ColorScheme::success_indicator("Created checkpoint"),
+                ColorScheme::checkpoint(&name),
+                ColorScheme::info("for instance:"),
+                ColorScheme::instance_id(&instance_id)
+            );
             Ok(false)
         }
-        CliCommand::Restore { checkpoint_name } => {
+        CliCommand::Restore { instance_id, checkpoint_name } => {
             let mut manager = instance_manager.lock().await;
-            let instance_id = manager.restore_instance(
+            manager.restore_instance_to_existing(
+                &instance_id,
                 &checkpoint_name,
                 criu_manager.clone(),
                 process_manager.clone(),
             ).await?;
-            println!("Restored instance {} from checkpoint: {}", instance_id, checkpoint_name);
+            println!("{} {} {} {}",
+                ColorScheme::success_indicator("Restored instance"),
+                ColorScheme::instance_id(&instance_id),
+                ColorScheme::info("from checkpoint:"),
+                ColorScheme::checkpoint(&checkpoint_name)
+            );
             Ok(false)
         }
         CliCommand::Cd { directory } => {
@@ -440,29 +466,29 @@ async fn enter_attach_mode(
 }
 
 fn print_help() {
-    println!("Available commands:");
-    println!("  start <program> [args...]        - Start a new program instance");
-    println!("  start-detached <program> [args...] - Start a detached instance (CRIU-optimized)");
-    println!("  stop <instance_id>               - Stop an instance");
-    println!("  pause <instance_id>              - Pause an instance");
-    println!("  resume <instance_id>             - Resume a paused instance");
-    println!("  list                             - List all instances");
-    println!("  attach <instance_id>             - Enter instance mode (shows historical output)");
-    println!("  detach                           - Exit instance mode");
-    println!("  logs [instance_id] [lines]       - Show recent output (default: current instance, 20 lines)");
-    println!("  checkpoint <instance_id> <name>  - Create a checkpoint");
-    println!("  restore <checkpoint_name>        - Restore from checkpoint");
-    println!("  analyze-tty <instance_id>        - Analyze TTY environment for CRIU compatibility");
-    println!("  cd <directory>                   - Change working directory");
-    println!("  help                             - Show this help");
-    println!("  exit                             - Exit the CLI");
+    println!("{}", ColorScheme::header("Available commands:"));
+    println!("  {} {} - {}", ColorScheme::command("start"), ColorScheme::info("<program> [args...]"), "Start a new program instance");
+    println!("  {} {} - {}", ColorScheme::command("start-detached"), ColorScheme::info("<program> [args...]"), "Start a detached instance (CRIU-optimized)");
+    println!("  {} {} - {}", ColorScheme::command("stop"), ColorScheme::info("<instance_id>"), "Stop an instance");
+    println!("  {} {} - {}", ColorScheme::command("pause"), ColorScheme::info("<instance_id>"), "Pause an instance");
+    println!("  {} {} - {}", ColorScheme::command("resume"), ColorScheme::info("<instance_id>"), "Resume a paused instance");
+    println!("  {} - {}", ColorScheme::command("list"), "List all instances");
+    println!("  {} {} - {}", ColorScheme::command("attach"), ColorScheme::info("<instance_id>"), "Enter instance mode (shows historical output)");
+    println!("  {} - {}", ColorScheme::command("detach"), "Exit instance mode");
+    println!("  {} {} - {}", ColorScheme::command("logs"), ColorScheme::info("[instance_id] [lines]"), "Show recent output (default: current instance, 20 lines)");
+    println!("  {} {} - {}", ColorScheme::command("checkpoint"), ColorScheme::info("<instance_id> <name>"), "Create a checkpoint");
+    println!("  {} {} - {}", ColorScheme::command("restore"), ColorScheme::info("<instance_id> <checkpoint_name>"), "Restore instance from checkpoint");
+    println!("  {} {} - {}", ColorScheme::command("analyze-tty"), ColorScheme::info("<instance_id>"), "Analyze TTY environment for CRIU compatibility");
+    println!("  {} {} - {}", ColorScheme::command("cd"), ColorScheme::info("<directory>"), "Change working directory");
+    println!("  {} - {}", ColorScheme::command("help"), "Show this help");
+    println!("  {} - {}", ColorScheme::command("exit"), "Exit the CLI");
     println!();
-    println!("Aliases:");
-    println!("  startd = start-detached");
-    println!("  tty = analyze-tty");
+    println!("{}", ColorScheme::header("Aliases:"));
+    println!("  {} = {}", ColorScheme::command("startd"), ColorScheme::command("start-detached"));
+    println!("  {} = {}", ColorScheme::command("tty"), ColorScheme::command("analyze-tty"));
     println!();
-    println!("Tips:");
-    println!("  • Use 'start-detached' for better CRIU checkpoint/restore compatibility");
-    println!("  • Use 'analyze-tty' to check if a process is CRIU-friendly");
-    println!("  • Detached instances have limited input capabilities but work better with CRIU");
+    println!("{}", ColorScheme::header("Tips:"));
+    println!("  {} {}", ColorScheme::info_indicator("•"), "Use 'start-detached' for better CRIU checkpoint/restore compatibility");
+    println!("  {} {}", ColorScheme::info_indicator("•"), "Use 'analyze-tty' to check if a process is CRIU-friendly");
+    println!("  {} {}", ColorScheme::info_indicator("•"), "Detached instances have limited input capabilities but work better with CRIU");
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StartMode {
     Normal,
     Detached,
@@ -23,6 +23,8 @@ pub struct Instance {
     pub working_dir: PathBuf,
     pub checkpoints: HashMap<String, CheckpointInfo>,
     pub start_mode: StartMode,
+    pub instance_dir: PathBuf,  // Dedicated folder for this instance
+    pub metadata_file: PathBuf, // Path to instance metadata file
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,8 +73,12 @@ impl Instance {
     }
 
     pub fn new_with_mode(program: String, args: Vec<String>, working_dir: PathBuf, start_mode: StartMode) -> Self {
+        let id = Uuid::new_v4();
+        let instance_dir = Self::create_instance_directory(&id);
+        let metadata_file = instance_dir.join("metadata.json");
+
         Self {
-            id: Uuid::new_v4(),
+            id,
             program,
             args,
             status: InstanceStatus::Starting,
@@ -81,6 +87,8 @@ impl Instance {
             working_dir,
             checkpoints: HashMap::new(),
             start_mode,
+            instance_dir,
+            metadata_file,
         }
     }
 
@@ -96,6 +104,71 @@ impl Instance {
 
     pub fn short_id(&self) -> String {
         self.id.to_string()[..8].to_string()
+    }
+
+    /// Create instance directory structure
+    fn create_instance_directory(id: &Uuid) -> PathBuf {
+        let instances_dir = PathBuf::from("instances");
+        let short_id = id.to_string()[..8].to_string();
+        let instance_dir = instances_dir.join(format!("instance_{}", short_id));
+
+        // Create directory structure
+        if let Err(e) = std::fs::create_dir_all(&instance_dir) {
+            eprintln!("Warning: Failed to create instance directory {}: {}", instance_dir.display(), e);
+        }
+
+        // Create subdirectories
+        let subdirs = ["checkpoints", "logs", "scripts", "output"];
+        for subdir in &subdirs {
+            let subdir_path = instance_dir.join(subdir);
+            if let Err(e) = std::fs::create_dir_all(&subdir_path) {
+                eprintln!("Warning: Failed to create subdirectory {}: {}", subdir_path.display(), e);
+            }
+        }
+
+        instance_dir
+    }
+
+    /// Get the checkpoints directory for this instance
+    pub fn checkpoints_dir(&self) -> PathBuf {
+        self.instance_dir.join("checkpoints")
+    }
+
+    /// Get the logs directory for this instance
+    pub fn logs_dir(&self) -> PathBuf {
+        self.instance_dir.join("logs")
+    }
+
+    /// Get the scripts directory for this instance
+    pub fn scripts_dir(&self) -> PathBuf {
+        self.instance_dir.join("scripts")
+    }
+
+    /// Get the output directory for this instance
+    pub fn output_dir(&self) -> PathBuf {
+        self.instance_dir.join("output")
+    }
+
+    /// Save instance metadata to file
+    pub fn save_metadata(&self) -> Result<()> {
+        let metadata_json = serde_json::to_string_pretty(self)
+            .map_err(|e| CriuCliError::ParseError(format!("Failed to serialize metadata: {}", e)))?;
+
+        std::fs::write(&self.metadata_file, metadata_json)
+            .map_err(|e| CriuCliError::IoError(e))?;
+
+        Ok(())
+    }
+
+    /// Load instance metadata from file
+    pub fn load_metadata(metadata_file: &PathBuf) -> Result<Self> {
+        let metadata_json = std::fs::read_to_string(metadata_file)
+            .map_err(|e| CriuCliError::IoError(e))?;
+
+        let instance: Instance = serde_json::from_str(&metadata_json)
+            .map_err(|e| CriuCliError::ParseError(format!("Failed to deserialize metadata: {}", e)))?;
+
+        Ok(instance)
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::criu_manager::CriuManager;
 use crate::process_manager::ProcessManager;
 use crate::types::{CriuCliError, Instance, InstanceStatus, Result, StartMode};
+use crate::colors::ColorScheme;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -51,6 +52,11 @@ impl InstanceManager {
         let short_id = instance.short_id();
         let instance_id = instance.id;
 
+        // Save instance metadata
+        if let Err(e) = instance.save_metadata() {
+            warn!("Failed to save instance metadata: {}", e);
+        }
+
         self.instances.insert(instance_id, instance);
         self.instance_by_short_id.insert(short_id.clone(), instance_id);
 
@@ -88,6 +94,11 @@ impl InstanceManager {
         let short_id = instance.short_id();
         let instance_id = instance.id;
 
+        // Save instance metadata
+        if let Err(e) = instance.save_metadata() {
+            warn!("Failed to save instance metadata: {}", e);
+        }
+
         self.instances.insert(instance_id, instance);
         self.instance_by_short_id.insert(short_id.clone(), instance_id);
 
@@ -101,14 +112,53 @@ impl InstanceManager {
     ) -> Result<()> {
         let instance_id = self.resolve_instance_id(instance_id_str)?;
 
-        if let Some(instance) = self.instances.get_mut(&instance_id) {
-            if instance.status != InstanceStatus::Running && instance.status != InstanceStatus::Paused {
-                return Err(CriuCliError::InstanceNotRunning(instance_id_str.to_string()));
+        // First, get the instance info we need without holding a mutable reference
+        let (is_detached, stored_pid, program_name, short_id) = {
+            if let Some(instance) = self.instances.get(&instance_id) {
+                if instance.status != InstanceStatus::Running && instance.status != InstanceStatus::Paused {
+                    return Err(CriuCliError::InstanceNotRunning(instance_id_str.to_string()));
+                }
+                (instance.start_mode == StartMode::Detached, instance.pid, instance.program.clone(), instance.short_id())
+            } else {
+                return Err(CriuCliError::InstanceNotFound(instance_id_str.to_string()));
             }
+        };
 
-            info!("Stopping instance: {}", instance.short_id());
+        info!("Stopping instance: {}", short_id);
 
-            match process_manager.stop_process(&instance_id).await {
+        // Now determine the actual PID to stop
+        let actual_pid = if is_detached {
+            if let Some(stored_pid) = stored_pid {
+                // Try to find the actual running process by name
+                if let Some(real_pid) = self.find_actual_process_pid(&program_name).await {
+                    if real_pid != stored_pid {
+                        warn!("PID mismatch for instance {}: stored {} vs actual {}", short_id, stored_pid, real_pid);
+                        // Update the stored PID in the instance
+                        if let Some(instance) = self.instances.get_mut(&instance_id) {
+                            instance.pid = Some(real_pid);
+                        }
+                    }
+                    real_pid
+                } else {
+                    stored_pid // Fallback to stored PID
+                }
+            } else {
+                return Err(CriuCliError::ProcessError("Detached instance has no PID".to_string()));
+            }
+        } else {
+            stored_pid.unwrap_or(0) // Will use instance-based stopping anyway
+        };
+
+        // Now perform the actual stop operation
+        let result = if is_detached {
+            process_manager.stop_detached_process(actual_pid).await
+        } else {
+            process_manager.stop_process(&instance_id).await
+        };
+
+        // Finally, update the instance state
+        if let Some(instance) = self.instances.get_mut(&instance_id) {
+            match result {
                 Ok(()) => {
                     instance.status = InstanceStatus::Stopped;
                     instance.pid = None;
@@ -209,12 +259,21 @@ impl InstanceManager {
             // Get output history from process manager
             let output_history = process_manager.get_output_history(&instance_id).await;
 
+            // Use instance's dedicated checkpoints directory
+            let checkpoint_dir = instance.checkpoints_dir().join(checkpoint_name);
+
             match criu_manager
-                .create_checkpoint(pid, checkpoint_name, &instance_id, output_history)
+                .create_checkpoint_in_dir(pid, checkpoint_name, &checkpoint_dir, &instance_id, output_history)
                 .await
             {
                 Ok(checkpoint_dir) => {
                     instance.add_checkpoint(checkpoint_name.to_string(), checkpoint_dir);
+
+                    // Save updated instance metadata
+                    if let Err(e) = instance.save_metadata() {
+                        warn!("Failed to save instance metadata after checkpoint: {}", e);
+                    }
+
                     info!("Checkpoint '{}' created for instance {}", checkpoint_name, instance.short_id());
                     Ok(())
                 }
@@ -225,6 +284,66 @@ impl InstanceManager {
             }
         } else {
             Err(CriuCliError::InstanceNotFound(instance_id_str.to_string()))
+        }
+    }
+
+    pub async fn restore_instance_to_existing(
+        &mut self,
+        instance_id_str: &str,
+        checkpoint_name: &str,
+        criu_manager: Arc<CriuManager>,
+        process_manager: Arc<ProcessManager>,
+    ) -> Result<()> {
+        let instance_id = self.resolve_instance_id(instance_id_str)?;
+
+        // Check if instance exists
+        if !self.instances.contains_key(&instance_id) {
+            return Err(CriuCliError::InstanceNotFound(instance_id_str.to_string()));
+        }
+
+        info!("Restoring instance {} from checkpoint: {}", instance_id_str, checkpoint_name);
+
+        // Step 1: Stop the current process if it's running
+        {
+            let instance = self.instances.get(&instance_id).unwrap();
+            if instance.status == InstanceStatus::Running {
+                info!("Stopping current process before restore");
+                if let Err(e) = self.stop_instance(instance_id_str, process_manager.clone()).await {
+                    warn!("Failed to stop current process: {}, continuing with restore", e);
+                }
+            }
+        }
+
+        // Step 2: Restore from checkpoint using the specific instance
+        match criu_manager.restore_checkpoint(checkpoint_name, Some(&instance_id)).await {
+            Ok((pid, _output_history)) => {
+                // Step 3: Update the instance with new PID and status
+                if let Some(instance) = self.instances.get_mut(&instance_id) {
+                    instance.pid = Some(pid);
+                    instance.status = InstanceStatus::Running;
+                    info!("Updated instance {} with restored PID {}", instance.short_id(), pid);
+                } else {
+                    return Err(CriuCliError::InstanceNotFound(instance_id_str.to_string()));
+                }
+
+                // Step 4: Register the restored process with the process manager
+                if let Err(e) = process_manager.register_restored_process(instance_id, pid, None).await {
+                    error!("Failed to register restored process: {}", e);
+                    return Err(e);
+                }
+
+                info!("Instance {} restored from checkpoint '{}'", instance_id_str, checkpoint_name);
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to restore checkpoint '{}': {}", checkpoint_name, e);
+                // Mark instance as failed
+                if let Some(instance) = self.instances.get_mut(&instance_id) {
+                    instance.status = InstanceStatus::Failed;
+                    instance.pid = None;
+                }
+                Err(e)
+            }
         }
     }
 
@@ -286,12 +405,20 @@ impl InstanceManager {
 
     pub fn list_instances(&self) {
         if self.instances.is_empty() {
-            println!("No instances running.");
+            println!("{}", ColorScheme::info("No instances running."));
             return;
         }
 
-        println!("{:<10} {:<12} {:<20} {:<8} {:<10} {:<30}", "ID", "STATUS", "PROGRAM", "PID", "MODE", "CREATED");
-        println!("{}", "-".repeat(90));
+        // Print colorized header
+        println!("{:<10} {:<12} {:<20} {:<8} {:<10} {:<30}",
+            ColorScheme::table_header("ID"),
+            ColorScheme::table_header("STATUS"),
+            ColorScheme::table_header("PROGRAM"),
+            ColorScheme::table_header("PID"),
+            ColorScheme::table_header("MODE"),
+            ColorScheme::table_header("CREATED")
+        );
+        println!("{}", ColorScheme::separator(90));
 
         // Track PIDs to detect conflicts
         let mut pid_usage: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
@@ -337,12 +464,12 @@ impl InstanceManager {
 
             println!(
                 "{:<10} {:<12} {:<20} {:<8} {:<10} {:<30}",
-                instance.short_id(),
-                actual_status,
-                instance.program,
-                pid_str,
-                mode_str,
-                created_str
+                ColorScheme::instance_id(&instance.short_id()),
+                ColorScheme::format_status(&actual_status),
+                ColorScheme::program(&instance.program),
+                if pid_str == "N/A" { pid_str } else { ColorScheme::pid(&pid_str) },
+                ColorScheme::format_mode(mode_str),
+                ColorScheme::timestamp(&created_str)
             );
         }
 
@@ -448,5 +575,44 @@ impl InstanceManager {
         }
 
         Err(CriuCliError::InstanceNotFound(instance_id_str.to_string()))
+    }
+
+    async fn find_actual_process_pid(&self, program_path: &str) -> Option<u32> {
+        // Extract just the program name without path
+        let program_basename = std::path::Path::new(program_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program_path);
+
+        info!("Looking for actual PID of process: {}", program_basename);
+
+        // Read /proc to find processes
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(pid_str) = entry.file_name().into_string() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        // Read the command line
+                        let cmdline_path = format!("/proc/{}/cmdline", pid);
+                        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                            // cmdline is null-separated, take the first part
+                            let cmd = cmdline.split('\0').next().unwrap_or("");
+                            let cmd_basename = std::path::Path::new(cmd)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(cmd);
+
+                            // Exact match for the program name
+                            if cmd_basename == program_basename && !cmd.contains("sh") && !cmd.contains("bash") {
+                                info!("Found actual process: PID {} with cmdline: {}", pid, cmdline.replace('\0', " "));
+                                return Some(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        warn!("No actual process found with name: {}", program_basename);
+        None
     }
 }

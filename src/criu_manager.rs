@@ -13,12 +13,12 @@ pub struct CriuManager {
 impl CriuManager {
     pub fn new() -> Self {
         let criu_path = PathBuf::from("/home/realgod/sync2/criu/criu/criu");
-        let checkpoints_dir = PathBuf::from("/home/realgod/sync2/checkpoints");
+        let checkpoints_dir = PathBuf::from("instances"); // Use instances directory
 
-        // Create checkpoints directory if it doesn't exist
+        // Create instances directory if it doesn't exist
         if !checkpoints_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&checkpoints_dir) {
-                error!("Failed to create checkpoints directory: {}", e);
+                error!("Failed to create instances directory: {}", e);
             }
         }
 
@@ -35,10 +35,22 @@ impl CriuManager {
         instance_id: &Uuid,
         output_history: Option<Vec<String>>,
     ) -> Result<PathBuf> {
-        // Create instance-specific directory structure
-        let instance_dir = self.checkpoints_dir.join(format!("instance_{}", instance_id));
-        let checkpoint_dir = instance_dir.join(checkpoint_name);
+        // Create instance-specific directory structure using short ID
+        let short_id = instance_id.to_string()[..8].to_string();
+        let instance_dir = self.checkpoints_dir.join(format!("instance_{}", short_id));
+        let checkpoint_dir = instance_dir.join("checkpoints").join(checkpoint_name);
 
+        self.create_checkpoint_in_dir(pid, checkpoint_name, &checkpoint_dir, instance_id, output_history).await
+    }
+
+    pub async fn create_checkpoint_in_dir(
+        &self,
+        pid: u32,
+        checkpoint_name: &str,
+        checkpoint_dir: &PathBuf,
+        instance_id: &Uuid,
+        output_history: Option<Vec<String>>,
+    ) -> Result<PathBuf> {
         // Create checkpoint directory
         std::fs::create_dir_all(&checkpoint_dir).map_err(|e| {
             error!("Failed to create checkpoint directory: {}", e);
@@ -139,7 +151,7 @@ impl CriuManager {
         }
 
         info!("Checkpoint created successfully: {}", checkpoint_name);
-        Ok(checkpoint_dir)
+        Ok(checkpoint_dir.clone())
     }
 
     pub async fn restore_checkpoint(
@@ -147,10 +159,36 @@ impl CriuManager {
         checkpoint_name: &str,
         instance_id: Option<&Uuid>,
     ) -> Result<(u32, Option<Vec<String>>)> {
-        // Try to find checkpoint in instance-specific directory first
+        // Try to find checkpoint in instance-specific directory first, then search globally
         let checkpoint_dir = if let Some(id) = instance_id {
-            let instance_dir = self.checkpoints_dir.join(format!("instance_{}", id));
-            instance_dir.join(checkpoint_name)
+            let short_id = id.to_string()[..8].to_string();
+            let instance_dir = self.checkpoints_dir.join(format!("instance_{}", short_id));
+            let expected_checkpoint_path = instance_dir.join("checkpoints").join(checkpoint_name);
+
+            if expected_checkpoint_path.exists() {
+                info!("Found checkpoint '{}' in expected instance directory: instance_{}", checkpoint_name, short_id);
+                expected_checkpoint_path
+            } else {
+                warn!("⚠️  Checkpoint '{}' not found in instance_{} directory", checkpoint_name, short_id);
+                warn!("🔍 Searching for checkpoint '{}' in all instance directories...", checkpoint_name);
+
+                // Search in all instance directories
+                match self.find_checkpoint_in_any_instance(checkpoint_name) {
+                    Ok(found_path) => {
+                        // Extract the instance directory name from the found path
+                        if let Some(parent) = found_path.parent() {
+                            if let Some(grandparent) = parent.parent() {
+                                if let Some(instance_name) = grandparent.file_name() {
+                                    warn!("✅ Found checkpoint '{}' in different instance: {}", checkpoint_name, instance_name.to_string_lossy());
+                                    warn!("📁 Will restore from: {}", found_path.display());
+                                }
+                            }
+                        }
+                        found_path
+                    }
+                    Err(e) => return Err(e)
+                }
+            }
         } else {
             // Fallback: search in all instance directories
             self.find_checkpoint_in_any_instance(checkpoint_name)?
@@ -159,6 +197,12 @@ impl CriuManager {
         if !checkpoint_dir.exists() {
             return Err(CriuCliError::CheckpointNotFound(checkpoint_name.to_string()));
         }
+
+        // Convert to absolute path for CRIU
+        let checkpoint_dir = checkpoint_dir.canonicalize().map_err(|e| {
+            error!("Failed to get absolute path for checkpoint directory: {}", e);
+            CriuCliError::IoError(e)
+        })?;
 
         info!("Restoring checkpoint from {:?}", checkpoint_dir);
 
@@ -373,7 +417,7 @@ impl CriuManager {
         }
 
         let entries = std::fs::read_dir(&self.checkpoints_dir).map_err(|e| {
-            error!("Failed to read checkpoints directory: {}", e);
+            error!("Failed to read instances directory: {}", e);
             CriuCliError::IoError(e)
         })?;
 
@@ -381,8 +425,9 @@ impl CriuManager {
             let entry = entry.map_err(CriuCliError::IoError)?;
             if entry.file_type().map_err(CriuCliError::IoError)?.is_dir() {
                 let instance_dir = entry.path();
-                let checkpoint_path = instance_dir.join(checkpoint_name);
+                let checkpoint_path = instance_dir.join("checkpoints").join(checkpoint_name);
                 if checkpoint_path.exists() {
+                    info!("Found checkpoint '{}' in instance directory: {:?}", checkpoint_name, instance_dir);
                     return Ok(checkpoint_path);
                 }
             }

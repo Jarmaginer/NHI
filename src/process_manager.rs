@@ -170,7 +170,7 @@ impl ProcessManager {
         let mut processes = self.processes.lock().await;
 
         if let Some(mut process_info) = processes.remove(instance_id) {
-            info!("Stopping process with PID: {}", process_info.pid);
+            info!("Stopping managed process with PID: {}", process_info.pid);
 
             // Try graceful shutdown first
             if let Err(e) = process_info.child.kill().await {
@@ -189,11 +189,42 @@ impl ProcessManager {
 
             Ok(())
         } else {
+            // For detached processes, we need to kill by PID using system signals
             Err(CriuCliError::InstanceNotFound(format!(
-                "Process not found for instance: {}",
+                "Process not found for instance: {} (may be detached)",
                 instance_id
             )))
         }
+    }
+
+    pub async fn stop_detached_process(&self, pid: u32) -> Result<()> {
+        info!("Stopping detached process with PID: {}", pid);
+
+        // Use system signal to kill the detached process
+        let pid_nix = Pid::from_raw(pid as i32);
+
+        // Try SIGTERM first (graceful)
+        if let Err(e) = signal::kill(pid_nix, Signal::SIGTERM) {
+            warn!("Failed to send SIGTERM to process {}: {}", pid, e);
+
+            // Try SIGKILL (forceful)
+            if let Err(e) = signal::kill(pid_nix, Signal::SIGKILL) {
+                error!("Failed to send SIGKILL to process {}: {}", pid, e);
+                return Err(CriuCliError::ProcessError(format!("Failed to kill process {}: {}", pid, e)));
+            }
+        }
+
+        // Wait a moment and check if process is gone
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        if signal::kill(pid_nix, None).is_ok() {
+            warn!("Process {} is still running after kill attempts", pid);
+            info!("Detached process {} is no longer running", pid);
+        } else {
+            info!("Detached process {} is no longer running", pid);
+        }
+
+        Ok(())
     }
 
     pub async fn pause_process(&self, instance_id: &Uuid) -> Result<()> {
@@ -331,13 +362,14 @@ impl ProcessManager {
         // We can't capture stdout/stderr from an already running process easily,
         // but we can try to send input to it via /proc/PID/fd/0
 
-        let output_history = Arc::new(Mutex::new(restored_history.unwrap_or_default()));
+        // Start with empty history for restored processes - we'll read from the live output file
+        let output_history = Arc::new(Mutex::new(Vec::new()));
         let (output_sender, _) = tokio::sync::broadcast::channel(1000);
         let (stdin_sender, mut stdin_receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        // Try to find the output file for this restored process
-        // Look for the original detached process output file
-        let output_file_path = self.find_output_file_for_pid(pid).await;
+        // For restored processes, we know the output file location based on instance ID
+        // Find the instance that matches this PID and use its output file
+        let output_file_path = self.find_output_file_for_restored_process(instance_id, pid).await;
 
         // Start output monitoring if we found an output file
         let output_monitor = if let Some(output_file) = output_file_path {
@@ -349,22 +381,27 @@ impl ProcessManager {
 
             Some(tokio::spawn(async move {
                 let mut last_size = 0;
-
-                // Get current file size to start monitoring from the end
-                if let Ok(metadata) = std::fs::metadata(&output_file_path) {
-                    last_size = metadata.len();
-                }
+                let mut first_read = true;
 
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     if let Ok(metadata) = std::fs::metadata(&output_file_path) {
                         let current_size = metadata.len();
-                        if current_size > last_size {
-                            // Read new content
+
+                        // For restored processes, read the entire file on first read
+                        if first_read || current_size > last_size {
                             if let Ok(content) = std::fs::read_to_string(&output_file_path) {
-                                let new_content = &content[last_size as usize..];
-                                for line in new_content.lines() {
+                                let content_to_process = if first_read {
+                                    // Read entire file on first read for restored processes
+                                    first_read = false;
+                                    &content
+                                } else {
+                                    // Read only new content on subsequent reads
+                                    &content[last_size as usize..]
+                                };
+
+                                for line in content_to_process.lines() {
                                     if !line.is_empty() {
                                         let output_line = format!("[OUTPUT] {}", line);
 
@@ -463,8 +500,17 @@ impl ProcessManager {
     ) -> Result<u32> {
         info!("Starting detached process: {} with args: {:?}", program, args);
 
-        // Create a unique output file for this instance
-        let output_file = working_dir.join(format!("instance_{}_output.log", instance_id.to_string()[..8].to_string()));
+        // Create a unique output file for this instance in the instance directory
+        let short_id = instance_id.to_string()[..8].to_string();
+        let instance_dir = PathBuf::from("instances").join(format!("instance_{}", short_id));
+        let output_dir = instance_dir.join("output");
+
+        // Ensure output directory exists
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            error!("Failed to create output directory {:?}: {}", output_dir, e);
+        }
+
+        let output_file = output_dir.join("process_output.log");
 
         // Create a shell script that will start the process in a completely detached way
         let script_path = working_dir.join(format!("start_detached_{}.sh", instance_id.to_string()[..8].to_string()));
@@ -670,6 +716,9 @@ sleep 0.1
 
         info!("Looking for process with name: {}", program_basename);
 
+        // Get list of all processes and find the newest one matching our criteria
+        let mut matching_processes: Vec<u32> = Vec::new();
+
         // Read /proc to find processes
         if let Ok(entries) = std::fs::read_dir("/proc") {
             for entry in entries.flatten() {
@@ -685,17 +734,35 @@ sleep 0.1
                                 .and_then(|name| name.to_str())
                                 .unwrap_or(cmd);
 
-                            // Also check if the full command line contains our program
-                            if cmd_basename == program_basename ||
-                               cmd.contains(program_basename) ||
-                               cmdline.replace('\0', " ").contains(program_name) {
-                                info!("Found matching process: PID {} with cmdline: {}", pid, cmdline.replace('\0', " "));
-                                return Some(pid);
+                            // More precise matching: exact basename match and not a shell script
+                            if cmd_basename == program_basename && !cmd.contains("sh") && !cmd.contains("bash") {
+                                // Additional check: make sure it's not a script wrapper
+                                let stat_path = format!("/proc/{}/stat", pid);
+                                if let Ok(stat_content) = std::fs::read_to_string(&stat_path) {
+                                    // Check if this process was recently started (within last 10 seconds)
+                                    let parts: Vec<&str> = stat_content.split_whitespace().collect();
+                                    if parts.len() > 21 {
+                                        if let Ok(starttime) = parts[21].parse::<u64>() {
+                                            // This is a more reliable way to find the actual process
+                                            matching_processes.push(pid);
+                                            info!("Found candidate process: PID {} with cmdline: {}", pid, cmdline.replace('\0', " "));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Return the most recently started process if we found any
+        if !matching_processes.is_empty() {
+            // Sort by PID (higher PID usually means more recent)
+            matching_processes.sort();
+            let selected_pid = *matching_processes.last().unwrap();
+            info!("Selected PID {} from {} candidates", selected_pid, matching_processes.len());
+            return Some(selected_pid);
         }
 
         warn!("No process found with name: {}", program_basename);
@@ -704,26 +771,27 @@ sleep 0.1
 
     async fn find_output_file_for_pid(&self, pid: u32) -> Option<String> {
         // Try to find the output file for a given PID
-        // Look for files matching the pattern instance_*_output.log
+        // Look in the new instances directory structure
 
-        let current_dir = std::env::current_dir().ok()?;
+        let instances_dir = PathBuf::from("instances");
 
-        // Look for output files in the current directory
-        if let Ok(entries) = std::fs::read_dir(&current_dir) {
+        // Look for output files in all instance directories
+        if let Ok(entries) = std::fs::read_dir(&instances_dir) {
             for entry in entries.flatten() {
-                if let Some(filename) = entry.file_name().to_str() {
-                    if filename.starts_with("instance_") && filename.ends_with("_output.log") {
-                        let file_path = entry.path();
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    let instance_dir = entry.path();
+                    let output_file = instance_dir.join("output").join("process_output.log");
 
+                    if output_file.exists() {
                         // Check if this file is being written to by our PID
                         // We can check the file descriptors of the process
                         let fd_dir = format!("/proc/{}/fd", pid);
                         if let Ok(fd_entries) = std::fs::read_dir(&fd_dir) {
                             for fd_entry in fd_entries.flatten() {
                                 if let Ok(link_target) = std::fs::read_link(fd_entry.path()) {
-                                    if link_target == file_path {
-                                        info!("Found output file for PID {}: {}", pid, file_path.display());
-                                        return Some(file_path.to_string_lossy().to_string());
+                                    if link_target == output_file {
+                                        info!("Found output file for PID {}: {}", pid, output_file.display());
+                                        return Some(output_file.to_string_lossy().to_string());
                                     }
                                 }
                             }
@@ -735,5 +803,60 @@ sleep 0.1
 
         warn!("No output file found for PID {}", pid);
         None
+    }
+
+    async fn find_output_file_for_restored_process(&self, instance_id: Uuid, pid: u32) -> Option<String> {
+        // For restored processes, we can directly construct the output file path
+        let short_id = instance_id.to_string()[..8].to_string();
+        let output_file = PathBuf::from("instances")
+            .join(format!("instance_{}", short_id))
+            .join("output")
+            .join("process_output.log");
+
+        if output_file.exists() {
+            info!("Found output file for restored process {} (instance {}): {}", pid, short_id, output_file.display());
+            Some(output_file.to_string_lossy().to_string())
+        } else {
+            warn!("Output file not found for restored process {} (instance {}): {}", pid, short_id, output_file.display());
+            None
+        }
+    }
+
+    pub async fn show_process_output(&self, instance_id: &Uuid, lines: Option<usize>) -> Result<()> {
+        // Try to find output file for this instance
+        let short_id = instance_id.to_string()[..8].to_string();
+        let instance_dir = PathBuf::from("instances").join(format!("instance_{}", short_id));
+        let output_file = instance_dir.join("output").join("process_output.log");
+
+        if output_file.exists() {
+            info!("Reading output from: {:?}", output_file);
+
+            match std::fs::read_to_string(&output_file) {
+                Ok(content) => {
+                    let lines_to_show = lines.unwrap_or(50); // Default to last 50 lines
+                    let output_lines: Vec<&str> = content.lines().collect();
+                    let start_index = if output_lines.len() > lines_to_show {
+                        output_lines.len() - lines_to_show
+                    } else {
+                        0
+                    };
+
+                    println!("=== Process Output (last {} lines) ===", lines_to_show);
+                    for line in &output_lines[start_index..] {
+                        println!("{}", line);
+                    }
+                    println!("=== End Output ===");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Failed to read output file {:?}: {}", output_file, e);
+                    Err(CriuCliError::IoError(e))
+                }
+            }
+        } else {
+            warn!("No output file found for instance {}", short_id);
+            println!("No output file found for this instance.");
+            Ok(())
+        }
     }
 }

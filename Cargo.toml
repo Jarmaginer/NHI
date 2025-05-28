@@ -1,5 +1,5 @@
 [package]
-name = "criu-cli"
+name = "nhi"
 version = "0.1.0"
 edition = "2021"
 
@@ -17,6 +17,7 @@ thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.27", features = ["signal", "process"] }
 crossterm = "0.27"
+colored = "2.0"
 
 # CRIU integration
 rust-criu = { path = "../rust-criu" }
