@@ -1,0 +1,4 @@
+cargo:rerun-if-changed=test/piggie.c
+cargo:rerun-if-changed=proto/rpc.proto
+cargo:rerun-if-env-changed=GENERATE_PROTOBUF
+cargo:rerun-if-env-changed=GENERATE_TEST_PROCESS
