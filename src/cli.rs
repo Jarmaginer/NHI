@@ -44,6 +44,23 @@ pub enum CliCommand {
     AnalyzeTty {
         instance_id: String,
     },
+    // Cluster management commands
+    ClusterListNodes,
+    ClusterNodeInfo {
+        node_id: Option<String>,
+    },
+    ClusterConnect {
+        address: String,
+    },
+    ClusterDisconnect {
+        node_id: String,
+    },
+    ClusterStatus,
+    // Migration commands
+    Migrate {
+        instance_id: String,
+        target_node_id: String,
+    },
 }
 
 impl CliCommand {
@@ -172,6 +189,60 @@ impl CliCommand {
                 }
                 Ok(CliCommand::AnalyzeTty {
                     instance_id: parts[1].to_string(),
+                })
+            }
+            "cluster" => {
+                if parts.len() < 2 {
+                    return Err(CriuCliError::ParseError(
+                        "cluster command requires a subcommand".to_string(),
+                    ));
+                }
+                match parts[1] {
+                    "list-nodes" | "nodes" => Ok(CliCommand::ClusterListNodes),
+                    "node-info" | "info" => {
+                        let node_id = if parts.len() > 2 {
+                            Some(parts[2].to_string())
+                        } else {
+                            None
+                        };
+                        Ok(CliCommand::ClusterNodeInfo { node_id })
+                    }
+                    "connect" => {
+                        if parts.len() != 3 {
+                            return Err(CriuCliError::ParseError(
+                                "cluster connect requires an address".to_string(),
+                            ));
+                        }
+                        Ok(CliCommand::ClusterConnect {
+                            address: parts[2].to_string(),
+                        })
+                    }
+                    "disconnect" => {
+                        if parts.len() != 3 {
+                            return Err(CriuCliError::ParseError(
+                                "cluster disconnect requires a node ID".to_string(),
+                            ));
+                        }
+                        Ok(CliCommand::ClusterDisconnect {
+                            node_id: parts[2].to_string(),
+                        })
+                    }
+                    "status" => Ok(CliCommand::ClusterStatus),
+                    _ => Err(CriuCliError::ParseError(format!(
+                        "Unknown cluster subcommand: {}. Available: list-nodes, node-info, connect, disconnect, status",
+                        parts[1]
+                    ))),
+                }
+            }
+            "migrate" => {
+                if parts.len() != 3 {
+                    return Err(CriuCliError::ParseError(
+                        "migrate command requires instance ID and target node ID".to_string(),
+                    ));
+                }
+                Ok(CliCommand::Migrate {
+                    instance_id: parts[1].to_string(),
+                    target_node_id: parts[2].to_string(),
                 })
             }
             _ => Err(CriuCliError::ParseError(format!(

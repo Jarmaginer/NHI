@@ -25,6 +25,10 @@ pub struct Instance {
     pub start_mode: StartMode,
     pub instance_dir: PathBuf,  // Dedicated folder for this instance
     pub metadata_file: PathBuf, // Path to instance metadata file
+    // Shadow state management fields
+    pub source_node_id: Option<Uuid>, // Node ID where the running instance is located
+    pub shadow_data_version: u64,     // Version counter for shadow data synchronization
+    pub last_sync_time: Option<DateTime<Utc>>, // Last time shadow data was synchronized
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +38,7 @@ pub enum InstanceStatus {
     Paused,
     Stopped,
     Failed,
+    Shadow,  // Shadow instance - receives real-time data but doesn't execute
 }
 
 impl std::fmt::Display for InstanceStatus {
@@ -44,6 +49,7 @@ impl std::fmt::Display for InstanceStatus {
             InstanceStatus::Paused => write!(f, "Paused"),
             InstanceStatus::Stopped => write!(f, "Stopped"),
             InstanceStatus::Failed => write!(f, "Failed"),
+            InstanceStatus::Shadow => write!(f, "Shadow"),
         }
     }
 }
@@ -89,6 +95,9 @@ impl Instance {
             start_mode,
             instance_dir,
             metadata_file,
+            source_node_id: None,
+            shadow_data_version: 0,
+            last_sync_time: None,
         }
     }
 
@@ -169,6 +178,47 @@ impl Instance {
             .map_err(|e| CriuCliError::ParseError(format!("Failed to deserialize metadata: {}", e)))?;
 
         Ok(instance)
+    }
+
+    /// Create a shadow instance from an existing instance
+    pub fn create_shadow(source_instance: &Instance, source_node_id: Uuid) -> Self {
+        let mut shadow = source_instance.clone();
+        shadow.status = InstanceStatus::Shadow;
+        shadow.pid = None; // Shadow instances don't have actual processes
+        shadow.source_node_id = Some(source_node_id);
+        shadow.shadow_data_version = 0;
+        shadow.last_sync_time = None;
+        shadow
+    }
+
+    /// Check if this instance is a shadow
+    pub fn is_shadow(&self) -> bool {
+        self.status == InstanceStatus::Shadow
+    }
+
+    /// Check if this instance is running (not shadow)
+    pub fn is_running(&self) -> bool {
+        self.status == InstanceStatus::Running
+    }
+
+    /// Update shadow synchronization data
+    pub fn update_shadow_sync(&mut self, version: u64) {
+        self.shadow_data_version = version;
+        self.last_sync_time = Some(Utc::now());
+    }
+
+    /// Convert shadow instance to running instance (for migration)
+    pub fn promote_to_running(&mut self, new_pid: u32) {
+        self.status = InstanceStatus::Running;
+        self.pid = Some(new_pid);
+        self.source_node_id = None; // No longer a shadow
+    }
+
+    /// Convert running instance to shadow instance (for migration)
+    pub fn demote_to_shadow(&mut self, source_node_id: Uuid) {
+        self.status = InstanceStatus::Shadow;
+        self.pid = None;
+        self.source_node_id = Some(source_node_id);
     }
 }
 
