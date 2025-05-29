@@ -2,10 +2,11 @@ use crate::cluster_state::{ClusterEvent, ClusterStateManager};
 use crate::message_protocol::*;
 use crate::network_manager::{NetworkEvent, NetworkManager};
 use crate::node_discovery::{DiscoveryEvent, NodeDiscovery};
+use crate::shadow_instance_manager::ShadowInstanceManager;
 use anyhow::{Result, Context};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -17,6 +18,7 @@ pub struct NodeManager {
     cluster_state: Arc<ClusterStateManager>,
     local_node_info: NodeInfo,
     is_running: Arc<Mutex<bool>>,
+    shadow_manager: Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
 }
 
 impl NodeManager {
@@ -31,7 +33,7 @@ impl NodeManager {
         );
 
         // Initialize components
-        let network_manager = Arc::new(NetworkManager::new(config.clone()));
+        let network_manager = Arc::new(NetworkManager::new(config.clone(), local_node_info.node_id));
         let discovery_service = Arc::new(NodeDiscovery::new(config.clone(), local_node_info.clone()));
         let cluster_state = Arc::new(ClusterStateManager::new(node_id));
 
@@ -41,6 +43,7 @@ impl NodeManager {
             cluster_state,
             local_node_info,
             is_running: Arc::new(Mutex::new(false)),
+            shadow_manager: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -62,6 +65,9 @@ impl NodeManager {
         // Start network manager
         self.network_manager.start_listening().await
             .context("Failed to start network manager")?;
+
+        // Start broadcast handler
+        self.network_manager.start_broadcast_handler().await;
 
         // Start discovery service
         self.discovery_service.start().await
@@ -116,6 +122,12 @@ impl NodeManager {
         &self.network_manager
     }
 
+    /// Set shadow manager for handling instance sync messages
+    pub async fn set_shadow_manager(&self, shadow_manager: Arc<RwLock<ShadowInstanceManager>>) {
+        let mut mgr = self.shadow_manager.lock().await;
+        *mgr = Some(shadow_manager);
+    }
+
     /// Connect to a specific peer
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
         info!("Attempting to connect to peer at {}", addr);
@@ -153,12 +165,13 @@ impl NodeManager {
         // Network events loop
         let network_manager = self.network_manager.clone();
         let cluster_state = self.cluster_state.clone();
+        let shadow_manager = self.shadow_manager.clone();
         let is_running = self.is_running.clone();
 
         tokio::spawn(async move {
             while *is_running.lock().await {
                 if let Some(event) = network_manager.next_event().await {
-                    if let Err(e) = Self::handle_network_event(event, &cluster_state, &network_manager).await {
+                    if let Err(e) = Self::handle_network_event(event, &cluster_state, &network_manager, &shadow_manager).await {
                         error!("Error handling network event: {}", e);
                     }
                 }
@@ -202,7 +215,7 @@ impl NodeManager {
         let is_running = self.is_running.clone();
 
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(30));
+            let mut interval = interval(Duration::from_secs(10)); // Send heartbeat every 10 seconds
 
             while *is_running.lock().await {
                 interval.tick().await;
@@ -219,7 +232,9 @@ impl NodeManager {
                 });
 
                 if let Err(e) = network_manager.broadcast(heartbeat).await {
-                    debug!("Failed to send heartbeat: {}", e);
+                    error!("Failed to send heartbeat: {}", e);
+                } else {
+                    debug!("Sent heartbeat from {}", local_node_id);
                 }
             }
         });
@@ -235,7 +250,7 @@ impl NodeManager {
                 interval.tick().await;
 
                 let now = chrono::Utc::now();
-                let timeout_duration = chrono::Duration::seconds(120); // 2 minutes timeout
+                let timeout_duration = chrono::Duration::seconds(300); // 5 minutes timeout
 
                 let cluster_state_data = cluster_state.get_cluster_state().await;
                 let mut nodes_to_remove = Vec::new();
@@ -244,6 +259,8 @@ impl NodeManager {
                     if *node_id != cluster_state.local_node_id() {
                         let time_since_last_seen = now - node_info.last_seen;
                         if time_since_last_seen > timeout_duration {
+                            warn!("Node {} has been unresponsive for {} seconds",
+                                  node_id, time_since_last_seen.num_seconds());
                             nodes_to_remove.push(*node_id);
                         }
                     }
@@ -284,6 +301,7 @@ impl NodeManager {
         event: NetworkEvent,
         cluster_state: &Arc<ClusterStateManager>,
         network_manager: &Arc<NetworkManager>,
+        shadow_manager: &Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
     ) -> Result<()> {
         match event {
             NetworkEvent::PeerConnected(node_id, addr) => {
@@ -295,16 +313,12 @@ impl NodeManager {
             NetworkEvent::PeerDisconnected(node_id, reason) => {
                 info!("Peer disconnected: {} ({})", node_id, reason);
 
-                // Update cluster state to offline
+                // Update cluster state to offline but don't remove immediately
+                // Let the timeout mechanism handle removal after grace period
                 cluster_state.update_node_status(&node_id, NodeStatus::Offline).await?;
-
-                // Also remove the node from cluster if it's not the local node
-                if node_id != cluster_state.local_node_id() {
-                    cluster_state.remove_node(&node_id, reason).await?;
-                }
             }
             NetworkEvent::MessageReceived(sender_id, message) => {
-                Self::handle_network_message(sender_id, message, cluster_state, network_manager).await?;
+                Self::handle_network_message(sender_id, message, cluster_state, network_manager, shadow_manager).await?;
             }
             NetworkEvent::ConnectionError(addr, error) => {
                 warn!("Connection error to {}: {}", addr, error);
@@ -374,6 +388,7 @@ impl NodeManager {
         message: NetworkMessage,
         cluster_state: &Arc<ClusterStateManager>,
         network_manager: &Arc<NetworkManager>,
+        shadow_manager: &Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
     ) -> Result<()> {
         match message {
             NetworkMessage::Discovery(discovery) => {
@@ -395,24 +410,62 @@ impl NodeManager {
             NetworkMessage::Response(response) => {
                 debug!("Received response from {}: {:?}", sender_id, response.response_type);
             }
-            NetworkMessage::Heartbeat(_heartbeat) => {
-                // Update node's last seen time
+            NetworkMessage::Heartbeat(heartbeat) => {
+                debug!("Received heartbeat from {}", sender_id);
+                // Update node's last seen time and status
                 if let Some(mut node_info) = cluster_state.get_node_info(&sender_id).await {
                     node_info.update_last_seen();
+                    node_info.set_status(NodeStatus::Online);
                     cluster_state.add_node(node_info).await?;
+                    debug!("Updated heartbeat for node {}", sender_id);
+                } else {
+                    // If we don't have this node, it might be a new connection
+                    warn!("Received heartbeat from unknown node: {}", sender_id);
                 }
             }
             NetworkMessage::Goodbye(goodbye) => {
                 info!("Received goodbye from {}: {}", goodbye.sender_id, goodbye.reason);
                 cluster_state.remove_node(&goodbye.sender_id, goodbye.reason).await?;
             }
-            NetworkMessage::InstanceSync(_instance_sync) => {
-                // TODO: Handle instance registry synchronization
+            NetworkMessage::InstanceSync(instance_sync) => {
                 debug!("Received instance sync from {}", sender_id);
+                // Forward to shadow manager if available
+                if let Some(shadow_mgr) = shadow_manager.lock().await.as_ref() {
+                    let shadow_mgr_read = shadow_mgr.read().await;
+                    if let Err(e) = shadow_mgr_read.handle_instance_sync(instance_sync).await {
+                        error!("Failed to handle instance sync: {}", e);
+                    }
+                }
             }
-            NetworkMessage::ShadowSync(_shadow_sync) => {
-                // TODO: Handle shadow state synchronization
+            NetworkMessage::InstanceStop(instance_stop) => {
+                debug!("Received instance stop from {} for instance {}", sender_id, instance_stop.instance_id);
+                // Forward to shadow manager if available
+                if let Some(shadow_mgr) = shadow_manager.lock().await.as_ref() {
+                    let shadow_mgr_read = shadow_mgr.read().await;
+                    if let Err(e) = shadow_mgr_read.handle_instance_stop(instance_stop).await {
+                        error!("Failed to handle instance stop: {}", e);
+                    }
+                }
+            }
+            NetworkMessage::ShadowSync(shadow_sync) => {
                 debug!("Received shadow sync from {}", sender_id);
+                // Forward to shadow manager if available
+                if let Some(shadow_mgr) = shadow_manager.lock().await.as_ref() {
+                    let shadow_mgr_read = shadow_mgr.read().await;
+                    if let Err(e) = shadow_mgr_read.handle_shadow_sync(shadow_sync).await {
+                        error!("Failed to handle shadow sync: {}", e);
+                    }
+                }
+            }
+            NetworkMessage::ShadowInput(shadow_input) => {
+                debug!("Received shadow input from {} for instance {}", sender_id, shadow_input.instance_id);
+                // Forward input to the local process if this is the target node
+                if shadow_input.target_node_id == cluster_state.local_node_id() {
+                    // TODO: Forward input to the actual running process
+                    // This would require access to the process manager
+                    debug!("Would forward input '{}' to instance {}",
+                           shadow_input.input_data, shadow_input.instance_id);
+                }
             }
             NetworkMessage::Migration(_migration) => {
                 // TODO: Handle migration coordination

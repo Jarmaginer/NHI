@@ -14,13 +14,20 @@ use std::io::Write;
 
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<Uuid, ProcessInfo>>>,
+    shadow_manager: Arc<Mutex<Option<Arc<tokio::sync::RwLock<crate::shadow_instance_manager::ShadowInstanceManager>>>>>,
 }
 
 impl ProcessManager {
     pub fn new() -> Self {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
+            shadow_manager: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub async fn set_shadow_manager(&self, shadow_manager: Arc<tokio::sync::RwLock<crate::shadow_instance_manager::ShadowInstanceManager>>) {
+        let mut mgr = self.shadow_manager.lock().await;
+        *mgr = Some(shadow_manager);
     }
 
     pub async fn start_process(
@@ -107,6 +114,8 @@ impl ProcessManager {
         let stdout_handle = if let Some(stdout) = stdout {
             let history = output_history.clone();
             let sender = output_sender.clone();
+            let shadow_mgr = self.shadow_manager.clone();
+            let instance_id_copy = instance_id;
             Some(tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
@@ -120,7 +129,20 @@ impl ProcessManager {
                     }
 
                     // Broadcast to any attached listeners
-                    let _ = sender.send(output_line);
+                    let _ = sender.send(output_line.clone());
+
+                    // Stream to shadow instances if shadow manager is available
+                    if let Some(shadow_mgr_ref) = shadow_mgr.lock().await.as_ref() {
+                        let shadow_mgr_read = shadow_mgr_ref.read().await;
+                        let output_bytes = format!("{}\n", line).into_bytes();
+                        if let Err(e) = shadow_mgr_read.stream_output_to_shadows(
+                            instance_id_copy,
+                            output_bytes,
+                            crate::message_protocol::StreamType::Stdout
+                        ).await {
+                            tracing::debug!("Failed to stream stdout to shadows: {}", e);
+                        }
+                    }
                 }
             }))
         } else {
@@ -130,6 +152,8 @@ impl ProcessManager {
         let stderr_handle = if let Some(stderr) = stderr {
             let history = output_history.clone();
             let sender = output_sender.clone();
+            let shadow_mgr = self.shadow_manager.clone();
+            let instance_id_copy = instance_id;
             Some(tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
@@ -143,7 +167,20 @@ impl ProcessManager {
                     }
 
                     // Broadcast to any attached listeners
-                    let _ = sender.send(output_line);
+                    let _ = sender.send(output_line.clone());
+
+                    // Stream to shadow instances if shadow manager is available
+                    if let Some(shadow_mgr_ref) = shadow_mgr.lock().await.as_ref() {
+                        let shadow_mgr_read = shadow_mgr_ref.read().await;
+                        let output_bytes = format!("{}\n", line).into_bytes();
+                        if let Err(e) = shadow_mgr_read.stream_output_to_shadows(
+                            instance_id_copy,
+                            output_bytes,
+                            crate::message_protocol::StreamType::Stderr
+                        ).await {
+                            tracing::debug!("Failed to stream stderr to shadows: {}", e);
+                        }
+                    }
                 }
             }))
         } else {
@@ -621,6 +658,8 @@ sleep 0.1
             let output_file_path = output_file.clone();
             let history = output_history.clone();
             let sender = output_sender.clone();
+            let shadow_mgr = self.shadow_manager.clone();
+            let instance_id_copy = instance_id;
 
             tokio::spawn(async move {
                 let mut last_size = 0;
@@ -644,7 +683,25 @@ sleep 0.1
                                         }
 
                                         // Broadcast to any attached listeners
-                                        let _ = sender.send(output_line);
+                                        let _ = sender.send(output_line.clone());
+
+                                        // Stream to shadow instances if shadow manager is available
+                                        if let Some(shadow_mgr_ref) = shadow_mgr.lock().await.as_ref() {
+                                            let shadow_mgr_read = shadow_mgr_ref.read().await;
+                                            let output_bytes = format!("{}\n", line).into_bytes();
+                                            tracing::debug!("Streaming output to shadows: '{}' for instance {}", line, instance_id_copy);
+                                            if let Err(e) = shadow_mgr_read.stream_output_to_shadows(
+                                                instance_id_copy,
+                                                output_bytes,
+                                                crate::message_protocol::StreamType::Stdout
+                                            ).await {
+                                                tracing::error!("Failed to stream output to shadows: {}", e);
+                                            } else {
+                                                tracing::debug!("Successfully streamed output to shadows");
+                                            }
+                                        } else {
+                                            tracing::debug!("No shadow manager available for output streaming");
+                                        }
                                     }
                                 }
                             }

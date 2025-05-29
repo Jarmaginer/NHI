@@ -2,8 +2,10 @@ use crate::message_protocol::*;
 use crate::types::{Instance, InstanceStatus};
 use crate::distributed_registry::DistributedInstanceRegistry;
 use crate::shadow_manager::ShadowStateManager;
+use crate::streaming_manager::StreamingManager;
 use crate::criu_manager::CriuManager;
 use crate::process_manager::ProcessManager;
+use crate::instance::InstanceManager;
 use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -58,8 +60,10 @@ pub struct MigrationManager {
     active_migrations: Arc<RwLock<HashMap<Uuid, MigrationOperation>>>,
     registry: Arc<DistributedInstanceRegistry>,
     shadow_manager: Arc<ShadowStateManager>,
+    streaming_manager: Arc<StreamingManager>,
     criu_manager: Arc<CriuManager>,
     process_manager: Arc<ProcessManager>,
+    instance_manager: Arc<RwLock<InstanceManager>>,
     event_sender: mpsc::UnboundedSender<MigrationEvent>,
     event_receiver: Arc<Mutex<mpsc::UnboundedReceiver<MigrationEvent>>>,
     network_sender: Option<mpsc::UnboundedSender<NetworkMessage>>,
@@ -70,8 +74,10 @@ impl MigrationManager {
         local_node_id: NodeId,
         registry: Arc<DistributedInstanceRegistry>,
         shadow_manager: Arc<ShadowStateManager>,
+        streaming_manager: Arc<StreamingManager>,
         criu_manager: Arc<CriuManager>,
         process_manager: Arc<ProcessManager>,
+        instance_manager: Arc<RwLock<InstanceManager>>,
     ) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
@@ -80,8 +86,10 @@ impl MigrationManager {
             active_migrations: Arc::new(RwLock::new(HashMap::new())),
             registry,
             shadow_manager,
+            streaming_manager,
             criu_manager,
             process_manager,
+            instance_manager,
             event_sender,
             event_receiver: Arc::new(Mutex::new(event_receiver)),
             network_sender: None,

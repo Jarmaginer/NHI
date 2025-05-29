@@ -61,6 +61,10 @@ pub enum CliCommand {
         instance_id: String,
         target_node_id: String,
     },
+    // Shadow instance commands
+    ShadowView {
+        instance_id: String,
+    },
 }
 
 impl CliCommand {
@@ -243,6 +247,16 @@ impl CliCommand {
                 Ok(CliCommand::Migrate {
                     instance_id: parts[1].to_string(),
                     target_node_id: parts[2].to_string(),
+                })
+            }
+            "shadow-view" | "shadow" => {
+                if parts.len() != 2 {
+                    return Err(CriuCliError::ParseError(
+                        "shadow-view command requires an instance ID".to_string(),
+                    ));
+                }
+                Ok(CliCommand::ShadowView {
+                    instance_id: parts[1].to_string(),
                 })
             }
             _ => Err(CriuCliError::ParseError(format!(

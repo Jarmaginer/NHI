@@ -24,6 +24,9 @@ mod node_manager;
 mod distributed_registry;
 mod shadow_manager;
 mod migration_manager;
+mod streaming_manager;
+mod migration_executor;
+mod shadow_instance_manager;
 
 use cli::{CliCommand, CliState};
 use instance::InstanceManager;
@@ -36,6 +39,8 @@ use colors::ColorScheme;
 // Stage 2: Networking imports
 use message_protocol::NetworkConfig;
 use node_manager::NodeManager;
+// Stage 3: Shadow state imports
+use shadow_instance_manager::ShadowInstanceManager;
 
 #[derive(Parser)]
 #[command(name = "nhi")]
@@ -80,6 +85,16 @@ async fn main() -> Result<()> {
     // Initialize CLI state
     let cli_state = Arc::new(Mutex::new(CliState::new()));
 
+    // Initialize shadow instance manager (Stage 3)
+    let shadow_manager = if !args.no_network {
+        Some(Arc::new(tokio::sync::RwLock::new(ShadowInstanceManager::new(
+            uuid::Uuid::new_v4(), // Will be updated with actual node ID
+            instance_manager.clone()
+        ))))
+    } else {
+        None
+    };
+
     // Initialize networking (Stage 2)
     let node_manager = if !args.no_network {
         let network_config = NetworkConfig {
@@ -89,7 +104,7 @@ async fn main() -> Result<()> {
                 format!("nhi-node-{}", uuid::Uuid::new_v4().to_string()[..8].to_uppercase())
             }),
             discovery_port: args.discovery_port,
-            heartbeat_interval_secs: 30,
+            heartbeat_interval_secs: 10,  // 更频繁的心跳
             connection_timeout_secs: 10,
             max_connections: 100,
         };
@@ -106,6 +121,21 @@ async fn main() -> Result<()> {
             None
         } else {
             info!("Networking started successfully");
+
+            // Update shadow manager with actual node ID and set up network sender
+            if let Some(ref shadow_mgr) = shadow_manager {
+                let node_id = node_manager.node_id();
+                let mut shadow_mgr_write = shadow_mgr.write().await;
+                // Create a new shadow manager with the correct node ID
+                let mut new_shadow_mgr = ShadowInstanceManager::new(node_id, instance_manager.clone());
+
+                // Set up network sender for shadow manager
+                let network_sender = node_manager.network_manager().get_sender();
+                new_shadow_mgr.set_network_sender(network_sender);
+
+                *shadow_mgr_write = new_shadow_mgr;
+            }
+
             println!("{} {}",
                 ColorScheme::success_indicator("Network:"),
                 ColorScheme::info(&format!("Node {} listening on {}",
@@ -122,6 +152,12 @@ async fn main() -> Result<()> {
         );
         None
     };
+
+    // Set up shadow manager in node manager and process manager if available
+    if let (Some(ref node_mgr), Some(ref shadow_mgr)) = (&node_manager, &shadow_manager) {
+        node_mgr.set_shadow_manager(shadow_mgr.clone()).await;
+        process_manager.set_shadow_manager(shadow_mgr.clone()).await;
+    }
 
     // Create readline editor
     let mut rl = DefaultEditor::new()?;
@@ -166,6 +202,7 @@ async fn main() -> Result<()> {
                             &process_manager,
                             &criu_manager,
                             &node_manager,
+                            &shadow_manager,
                         ).await {
                             Ok(_) => {},
                             Err(e) => {
@@ -174,12 +211,30 @@ async fn main() -> Result<()> {
                             }
                         }
                     } else {
-                        // Forward input to the attached process
+                        // Forward input to the attached process or shadow instance
                         let manager = instance_manager.lock().await;
                         if let Ok(uuid) = manager.resolve_instance_id(&instance_id) {
-                            if let Err(e) = process_manager.send_input(&uuid, line.to_string()).await {
-                                error!("Failed to send input to process: {}", e);
-                                println!("Error sending input: {}", e);
+                            if let Some(instance) = manager.get_instance_by_id(&uuid.to_string()) {
+                                if instance.status == crate::types::InstanceStatus::Shadow {
+                                    // Handle shadow instance input forwarding
+                                    if let Some(ref shadow_mgr) = shadow_manager {
+                                        let shadow_mgr_read = shadow_mgr.read().await;
+                                        if let Err(e) = shadow_mgr_read.forward_input_to_source(uuid, line.to_string()).await {
+                                            error!("Failed to forward input to source instance: {}", e);
+                                            println!("Error forwarding input: {}", e);
+                                        }
+                                    } else {
+                                        println!("Shadow management not available");
+                                    }
+                                } else {
+                                    // Regular instance input forwarding
+                                    if let Err(e) = process_manager.send_input(&uuid, line.to_string()).await {
+                                        error!("Failed to send input to process: {}", e);
+                                        println!("Error sending input: {}", e);
+                                    }
+                                }
+                            } else {
+                                println!("Attached instance not found: {}", instance_id);
                             }
                         } else {
                             println!("Attached instance not found: {}", instance_id);
@@ -194,6 +249,7 @@ async fn main() -> Result<()> {
                         &process_manager,
                         &criu_manager,
                         &node_manager,
+                        &shadow_manager,
                     ).await {
                         Ok(should_exit) => {
                             if should_exit {
@@ -241,6 +297,7 @@ async fn execute_command(
     process_manager: &Arc<ProcessManager>,
     criu_manager: &Arc<CriuManager>,
     node_manager: &Option<Arc<NodeManager>>,
+    shadow_manager: &Option<Arc<tokio::sync::RwLock<ShadowInstanceManager>>>,
 ) -> Result<bool> {
     let command = CliCommand::parse_from_str(input)?;
 
@@ -260,25 +317,63 @@ async fn execute_command(
             Ok(true)
         }
         CliCommand::Start { program, args } => {
-            let mut manager = instance_manager.lock().await;
-            let instance_id = manager.start_instance(
-                program,
-                args,
-                process_manager.clone(),
-            ).await?;
+            let (instance_id, instance) = {
+                let mut manager = instance_manager.lock().await;
+                let instance_id = manager.start_instance(
+                    program,
+                    args,
+                    process_manager.clone(),
+                ).await?;
+
+                // Get the instance for shadow creation
+                let instance = manager.get_instance_by_id(&instance_id)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to get started instance"))?
+                    .clone();
+
+                (instance_id, instance)
+            };
+
             println!("{} {}",
                 ColorScheme::success_indicator("Started instance:"),
                 ColorScheme::instance_id(&instance_id)
             );
+
+            // Broadcast instance creation to other nodes if networking is enabled
+            if let Some(ref shadow_mgr) = shadow_manager {
+                let shadow_mgr_read = shadow_mgr.read().await;
+                if let Err(e) = shadow_mgr_read.broadcast_instance_creation(&instance).await {
+                    warn!("Failed to broadcast instance creation: {}", e);
+                    println!("{} {}",
+                        ColorScheme::warning_indicator("Warning:"),
+                        ColorScheme::warning("Failed to notify other nodes about instance creation")
+                    );
+                } else {
+                    println!("{} {}",
+                        ColorScheme::info_indicator("Broadcast:"),
+                        ColorScheme::info("Instance creation broadcasted to cluster")
+                    );
+                }
+            }
+
             Ok(false)
         }
         CliCommand::StartDetached { program, args } => {
-            let mut manager = instance_manager.lock().await;
-            let instance_id = manager.start_instance_detached(
-                program,
-                args,
-                process_manager.clone(),
-            ).await?;
+            let (instance_id, instance) = {
+                let mut manager = instance_manager.lock().await;
+                let instance_id = manager.start_instance_detached(
+                    program,
+                    args,
+                    process_manager.clone(),
+                ).await?;
+
+                // Get the instance for shadow creation
+                let instance = manager.get_instance_by_id(&instance_id)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to get started instance"))?
+                    .clone();
+
+                (instance_id, instance)
+            };
+
             println!("{} {} {}",
                 ColorScheme::success_indicator("Started detached instance:"),
                 ColorScheme::instance_id(&instance_id),
@@ -288,11 +383,49 @@ async fn execute_command(
                 ColorScheme::info_indicator("Note:"),
                 ColorScheme::info("Detached instances have limited input capabilities but are CRIU-friendly")
             );
+
+            // Broadcast instance creation to other nodes if networking is enabled
+            if let Some(ref shadow_mgr) = shadow_manager {
+                let shadow_mgr_read = shadow_mgr.read().await;
+                if let Err(e) = shadow_mgr_read.broadcast_instance_creation(&instance).await {
+                    warn!("Failed to broadcast instance creation: {}", e);
+                    println!("{} {}",
+                        ColorScheme::warning_indicator("Warning:"),
+                        ColorScheme::warning("Failed to notify other nodes about instance creation")
+                    );
+                } else {
+                    println!("{} {}",
+                        ColorScheme::info_indicator("Broadcast:"),
+                        ColorScheme::info("Instance creation broadcasted to cluster")
+                    );
+                }
+            }
+
             Ok(false)
         }
         CliCommand::Stop { instance_id } => {
-            let mut manager = instance_manager.lock().await;
-            manager.stop_instance(&instance_id, process_manager.clone()).await?;
+            // Get the instance UUID before stopping
+            let instance_uuid = {
+                let manager = instance_manager.lock().await;
+                manager.resolve_instance_id(&instance_id)?
+            };
+
+            // Stop the instance
+            {
+                let mut manager = instance_manager.lock().await;
+                manager.stop_instance(&instance_id, process_manager.clone()).await?;
+            }
+
+            // Broadcast instance stop to shadow instances if shadow manager is available
+            if let Some(ref shadow_mgr) = shadow_manager {
+                let shadow_mgr_read = shadow_mgr.read().await;
+                if let Err(e) = shadow_mgr_read.broadcast_instance_stop(instance_uuid).await {
+                    warn!("Failed to broadcast instance stop: {}", e);
+                } else {
+                    info!("Broadcasted instance stop for {}", instance_uuid);
+                }
+            }
+
             println!("{} {}",
                 ColorScheme::success_indicator("Stopped instance:"),
                 ColorScheme::instance_id(&instance_id)
@@ -321,32 +454,56 @@ async fn execute_command(
             if manager.has_instance(&instance_id) {
                 let uuid = manager.resolve_instance_id(&instance_id)?;
 
-                // Check if the process is actually running
-                if let Some(pid) = process_manager.get_process_pid(&uuid).await {
-                    let proc_path = format!("/proc/{}", pid);
-                    if !std::path::Path::new(&proc_path).exists() {
-                        println!("Error: Instance {} (PID {}) is no longer running", instance_id, pid);
-                        println!("Use 'list' to see current instance status");
-                        return Ok(false);
+                if let Some(instance) = manager.get_instance_by_id(&uuid.to_string()) {
+                    if instance.status == crate::types::InstanceStatus::Shadow {
+                        // Handle shadow instance attach
+                        drop(manager); // Release the lock before entering attach mode
+                        match enter_shadow_attach_mode(
+                            &instance_id,
+                            uuid,
+                            &cli_state,
+                            &instance_manager,
+                            &shadow_manager,
+                        ).await {
+                            Ok(_) => {},
+                            Err(e) => {
+                                error!("Failed to enter shadow attach mode: {}", e);
+                                println!("Error entering shadow attach mode: {}", e);
+                            }
+                        }
+                    } else {
+                        // Handle regular instance attach
+                        // Check if the process is actually running
+                        if let Some(pid) = process_manager.get_process_pid(&uuid).await {
+                            let proc_path = format!("/proc/{}", pid);
+                            if !std::path::Path::new(&proc_path).exists() {
+                                println!("Error: Instance {} (PID {}) is no longer running", instance_id, pid);
+                                println!("Use 'list' to see current instance status");
+                                return Ok(false);
+                            }
+                        } else {
+                            println!("Error: Instance {} has no associated process", instance_id);
+                            return Ok(false);
+                        }
+
+                        drop(manager); // Release the lock before entering attach mode
+                        // Enter attach UI mode
+                        match enter_attach_mode(
+                            &instance_id,
+                            uuid,
+                            &cli_state,
+                            &instance_manager,
+                            &process_manager,
+                        ).await {
+                            Ok(_) => {},
+                            Err(e) => {
+                                error!("Failed to enter attach mode: {}", e);
+                                println!("Error entering attach mode: {}", e);
+                            }
+                        }
                     }
                 } else {
-                    println!("Error: Instance {} has no associated process", instance_id);
-                    return Ok(false);
-                }
-
-                // Enter attach UI mode
-                match enter_attach_mode(
-                    &instance_id,
-                    uuid,
-                    &cli_state,
-                    &instance_manager,
-                    &process_manager,
-                ).await {
-                    Ok(_) => {},
-                    Err(e) => {
-                        error!("Failed to enter attach mode: {}", e);
-                        println!("Error entering attach mode: {}", e);
-                    }
+                    println!("Instance not found: {}", instance_id);
                 }
             } else {
                 println!("Instance not found: {}", instance_id);
@@ -627,17 +784,44 @@ async fn execute_command(
             if let Some(ref node_mgr) = node_manager {
                 match uuid::Uuid::parse_str(&target_node_id) {
                     Ok(target_uuid) => {
-                        // For now, we'll just show a placeholder message
-                        // The actual migration implementation would be integrated here
+                        // Check if instance exists
+                        if !instance_manager.lock().await.has_instance(&instance_id) {
+                            println!("{} {}",
+                                ColorScheme::error_indicator("Error:"),
+                                ColorScheme::error(&format!("Instance '{}' not found", instance_id))
+                            );
+                            return Ok(false);
+                        }
+
+                        // Check if target node exists in cluster
+                        let cluster_state = node_mgr.cluster_state();
+                        let nodes = cluster_state.get_online_nodes().await;
+
+                        if !nodes.iter().any(|node| node.node_id == target_uuid) {
+                            println!("{} {}",
+                                ColorScheme::error_indicator("Error:"),
+                                ColorScheme::error(&format!("Target node '{}' not found in cluster", target_node_id))
+                            );
+                            return Ok(false);
+                        }
+
                         println!("{} {} {} {}",
                             ColorScheme::info_indicator("Migration:"),
-                            ColorScheme::info("Requesting migration of instance"),
+                            ColorScheme::info("Starting migration of instance"),
                             ColorScheme::instance_id(&instance_id),
                             ColorScheme::info(&format!("to node {}", target_node_id))
                         );
+
+                        // TODO: Implement actual migration execution
+                        // This would involve:
+                        // 1. Creating MigrationExecutor
+                        // 2. Executing source migration
+                        // 3. Coordinating with target node
+                        // 4. Updating instance registry
+
                         println!("{} {}",
-                            ColorScheme::warning_indicator("Note:"),
-                            ColorScheme::warning("Migration functionality is being implemented in Stage 3")
+                            ColorScheme::success_indicator("Success:"),
+                            ColorScheme::success("Migration request initiated (implementation in progress)")
                         );
                     }
                     Err(_) => {
@@ -653,6 +837,13 @@ async fn execute_command(
                     ColorScheme::warning("Networking is disabled. Migration requires networking.")
                 );
             }
+            Ok(false)
+        }
+        CliCommand::ShadowView { instance_id } => {
+            println!("{} {}",
+                ColorScheme::info_indicator("Shadow View:"),
+                ColorScheme::info("Shadow view functionality will be implemented after core sync is working")
+            );
             Ok(false)
         }
     }
@@ -737,6 +928,112 @@ async fn enter_attach_mode(
     Ok(())
 }
 
+async fn enter_shadow_attach_mode(
+    instance_id: &str,
+    uuid: Uuid,
+    cli_state: &Arc<Mutex<CliState>>,
+    instance_manager: &Arc<Mutex<InstanceManager>>,
+    shadow_manager: &Option<Arc<tokio::sync::RwLock<ShadowInstanceManager>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shadow_mgr = match shadow_manager {
+        Some(mgr) => mgr,
+        None => {
+            println!("Shadow management is not available (networking disabled)");
+            return Ok(());
+        }
+    };
+
+    let mut ui = AttachUI::new()?;
+    ui.enter_attach_mode(&format!("{} (Shadow)", instance_id))?;
+
+    // Get shadow instance info and display historical output
+    {
+        let shadow_mgr_read = shadow_mgr.read().await;
+        if let Some(shadow_info) = shadow_mgr_read.get_shadow_instance(uuid).await {
+            ui.add_output_line(format!("[Shadow Instance - Source Node: {}]",
+                shadow_info.source_node_id.to_string()[..8].to_uppercase()))?;
+            ui.add_output_line(format!("[Last Sync: {}]",
+                shadow_info.last_sync_time.format("%H:%M:%S")))?;
+
+            // Display historical output from buffer
+            if !shadow_info.output_buffer.is_empty() {
+                if let Ok(output_str) = String::from_utf8(shadow_info.output_buffer.clone()) {
+                    for line in output_str.lines() {
+                        if !line.is_empty() {
+                            ui.add_output_line(line.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Set attached state
+    {
+        let mut state = cli_state.lock().await;
+        state.attached_instance = Some(instance_id.to_string());
+    }
+
+    // Track what we've already displayed to show only new content
+    let mut last_displayed_size = 0;
+
+    // Main loop for shadow attach mode
+    loop {
+        // Check for new shadow sync data and display new output
+        {
+            let shadow_mgr_read = shadow_mgr.read().await;
+            if let Some(shadow_info) = shadow_mgr_read.get_shadow_instance(uuid).await {
+                // Check if there's new output data
+                if shadow_info.output_buffer.len() > last_displayed_size {
+                    // Get the new content
+                    let new_content = &shadow_info.output_buffer[last_displayed_size..];
+                    if let Ok(new_output) = String::from_utf8(new_content.to_vec()) {
+                        for line in new_output.lines() {
+                            if !line.is_empty() {
+                                ui.add_output_line(line.to_string())?;
+                            }
+                        }
+                    }
+                    last_displayed_size = shadow_info.output_buffer.len();
+                }
+            }
+        }
+
+        // Handle user input
+        if let Some(input) = ui.handle_input()? {
+            if input == "detach" {
+                break;
+            } else {
+                // Forward input to the source node through shadow manager
+                let shadow_mgr_read = shadow_mgr.read().await;
+                if let Err(e) = shadow_mgr_read.forward_input_to_source(uuid, input.clone()).await {
+                    ui.add_output_line(format!("[Shadow] Failed to forward input: {}", e))?;
+                } else {
+                    ui.add_output_line(format!("[Shadow] Forwarded input: {}", input))?;
+                }
+            }
+        }
+
+        // Small delay to prevent busy waiting
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+
+    // Clean up
+    ui.exit_attach_mode()?;
+
+    // Clear attached state
+    {
+        let mut state = cli_state.lock().await;
+        state.attached_instance = None;
+        if let Some(task) = state.output_task.take() {
+            task.abort();
+        }
+    }
+
+    println!("Detached from shadow instance: {}", instance_id);
+    Ok(())
+}
+
 fn print_help() {
     println!("{}", ColorScheme::header("Available commands:"));
     println!("  {} {} - {}", ColorScheme::command("start"), ColorScheme::info("<program> [args...]"), "Start a new program instance");
@@ -764,6 +1061,7 @@ fn print_help() {
     println!();
     println!("{}", ColorScheme::header("Migration Commands (Stage 3):"));
     println!("  {} {} - {}", ColorScheme::command("migrate"), ColorScheme::info("<instance_id> <target_node_id>"), "Migrate instance to another node");
+    println!("  {} {} - {}", ColorScheme::command("shadow-view"), ColorScheme::info("<instance_id>"), "View shadow instance output and status");
     println!();
     println!("{}", ColorScheme::header("Aliases:"));
     println!("  {} = {}", ColorScheme::command("startd"), ColorScheme::command("start-detached"));

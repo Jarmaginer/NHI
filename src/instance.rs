@@ -561,6 +561,47 @@ impl InstanceManager {
         self.resolve_instance_id(instance_id_str).is_ok()
     }
 
+    /// Get instance by ID (read-only)
+    pub fn get_instance_by_id(&self, instance_id_str: &str) -> Option<&Instance> {
+        if let Ok(instance_id) = self.resolve_instance_id(instance_id_str) {
+            self.instances.get(&instance_id)
+        } else {
+            None
+        }
+    }
+
+    /// Get mutable instance by ID
+    pub fn get_instance_by_id_mut(&mut self, instance_id_str: &str) -> Option<&mut Instance> {
+        if let Ok(instance_id) = self.resolve_instance_id(instance_id_str) {
+            self.instances.get_mut(&instance_id)
+        } else {
+            None
+        }
+    }
+
+    /// Add an instance to the manager (for shadow instances)
+    pub fn add_instance(&mut self, instance: Instance) {
+        let short_id = instance.short_id();
+        let instance_id = instance.id;
+        self.instances.insert(instance_id, instance);
+        self.instance_by_short_id.insert(short_id, instance_id);
+    }
+
+    /// Remove an instance from the manager
+    pub fn remove_instance(&mut self, instance_id_str: &str) -> Option<Instance> {
+        if let Ok(instance_id) = self.resolve_instance_id(instance_id_str) {
+            if let Some(instance) = self.instances.remove(&instance_id) {
+                let short_id = instance.short_id();
+                self.instance_by_short_id.remove(&short_id);
+                Some(instance)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     pub fn resolve_instance_id(&self, instance_id_str: &str) -> Result<Uuid> {
         // Try to parse as full UUID first
         if let Ok(uuid) = Uuid::parse_str(instance_id_str) {

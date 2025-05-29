@@ -85,18 +85,23 @@ pub struct NetworkManager {
     connections: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     event_sender: mpsc::UnboundedSender<NetworkEvent>,
     event_receiver: Arc<Mutex<mpsc::UnboundedReceiver<NetworkEvent>>>,
+    broadcast_sender: mpsc::UnboundedSender<NetworkMessage>,
+    broadcast_receiver: Arc<Mutex<mpsc::UnboundedReceiver<NetworkMessage>>>,
 }
 
 impl NetworkManager {
-    pub fn new(config: NetworkConfig) -> Self {
+    pub fn new(config: NetworkConfig, node_id: NodeId) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (broadcast_sender, broadcast_receiver) = mpsc::unbounded_channel();
 
         Self {
-            node_id: Uuid::new_v4(),
+            node_id,
             config,
             connections: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
             event_receiver: Arc::new(Mutex::new(event_receiver)),
+            broadcast_sender,
+            broadcast_receiver: Arc::new(Mutex::new(broadcast_receiver)),
         }
     }
 
@@ -106,6 +111,29 @@ impl NetworkManager {
 
     pub fn config(&self) -> &NetworkConfig {
         &self.config
+    }
+
+    /// Get a sender for broadcasting messages to all connected peers
+    pub fn get_sender(&self) -> mpsc::UnboundedSender<NetworkMessage> {
+        self.broadcast_sender.clone()
+    }
+
+    /// Start the broadcast handler
+    pub async fn start_broadcast_handler(&self) {
+        let broadcast_receiver = self.broadcast_receiver.clone();
+        let connections = self.connections.clone();
+
+        tokio::spawn(async move {
+            let mut receiver = broadcast_receiver.lock().await;
+            while let Some(message) = receiver.recv().await {
+                let connections_read = connections.read().await;
+                for connection in connections_read.values() {
+                    if let Err(e) = connection.sender.send(message.clone()) {
+                        warn!("Failed to send broadcast message to {}: {}", connection.node_id, e);
+                    }
+                }
+            }
+        });
     }
 
     /// Start listening for incoming connections

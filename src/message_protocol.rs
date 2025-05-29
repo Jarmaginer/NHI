@@ -23,8 +23,12 @@ pub enum NetworkMessage {
     Goodbye(GoodbyeMessage),
     /// Instance registry synchronization
     InstanceSync(InstanceSyncMessage),
+    /// Instance stop notification
+    InstanceStop(InstanceStopMessage),
     /// Shadow state data synchronization
     ShadowSync(ShadowSyncMessage),
+    /// Shadow instance input forwarding
+    ShadowInput(ShadowInputMessage),
     /// Migration command and coordination
     Migration(MigrationMessage),
     /// Real-time data streaming
@@ -255,6 +259,14 @@ pub struct InstanceSyncMessage {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Instance stop notification message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceStopMessage {
+    pub sender_id: NodeId,
+    pub instance_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+}
+
 /// Shadow state synchronization message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadowSyncMessage {
@@ -263,6 +275,16 @@ pub struct ShadowSyncMessage {
     pub data_version: u64,
     pub checkpoint_data: Option<Vec<u8>>,
     pub output_data: Option<Vec<u8>>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Shadow instance input forwarding message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowInputMessage {
+    pub sender_id: NodeId,
+    pub target_node_id: NodeId,
+    pub instance_id: Uuid,
+    pub input_data: String,
     pub timestamp: DateTime<Utc>,
 }
 
