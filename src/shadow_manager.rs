@@ -1,6 +1,6 @@
 use crate::message_protocol::*;
-use crate::types::Instance;
-use anyhow::Result;
+use crate::types::{Instance, InstanceStatus};
+use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ pub struct ShadowStateManager {
 impl ShadowStateManager {
     pub fn new(local_node_id: NodeId) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
-
+        
         Self {
             local_node_id,
             shadow_states: Arc::new(RwLock::new(HashMap::new())),
@@ -84,29 +84,29 @@ impl ShadowStateManager {
     pub async fn update_shadow_state(&self, sync_message: ShadowSyncMessage) -> Result<()> {
         let updated = {
             let mut states = self.shadow_states.write().await;
-
+            
             if let Some(shadow_state) = states.get_mut(&sync_message.instance_id) {
                 // Only update if the version is newer
                 if sync_message.data_version > shadow_state.data_version {
                     shadow_state.data_version = sync_message.data_version;
                     shadow_state.last_sync_time = Utc::now();
-
+                    
                     if let Some(checkpoint_data) = sync_message.checkpoint_data {
                         shadow_state.checkpoint_data = Some(checkpoint_data.clone());
                         let _ = self.event_sender.send(ShadowEvent::CheckpointReceived(
-                            sync_message.instance_id,
+                            sync_message.instance_id, 
                             checkpoint_data
                         ));
                     }
-
+                    
                     if let Some(output_data) = sync_message.output_data {
                         shadow_state.output_buffer.extend_from_slice(&output_data);
                         let _ = self.event_sender.send(ShadowEvent::OutputReceived(
-                            sync_message.instance_id,
+                            sync_message.instance_id, 
                             output_data
                         ));
                     }
-
+                    
                     true
                 } else {
                     debug!("Ignoring older shadow sync data for instance {}", sync_message.instance_id);
@@ -120,7 +120,7 @@ impl ShadowStateManager {
 
         if updated {
             let _ = self.event_sender.send(ShadowEvent::StateUpdated(
-                sync_message.instance_id,
+                sync_message.instance_id, 
                 sync_message.data_version
             ));
         }
@@ -132,7 +132,7 @@ impl ShadowStateManager {
     pub async fn stream_data(&self, instance_id: Uuid, stream_type: StreamType, data: Vec<u8>) -> Result<()> {
         if let Some(network_sender) = &self.network_sender {
             let sequence_number = self.get_next_sequence_number(instance_id).await;
-
+            
             let stream_message = DataStreamMessage {
                 sender_id: self.local_node_id,
                 instance_id,
@@ -143,7 +143,7 @@ impl ShadowStateManager {
             };
 
             let network_message = NetworkMessage::DataStream(stream_message);
-
+            
             if let Err(e) = network_sender.send(network_message) {
                 error!("Failed to send data stream message: {}", e);
                 return Err(anyhow::anyhow!("Failed to send data stream: {}", e));
@@ -162,9 +162,9 @@ impl ShadowStateManager {
                 if let Some(shadow_state) = states.get_mut(&stream_message.instance_id) {
                     shadow_state.output_buffer.extend_from_slice(&stream_message.data);
                     shadow_state.last_sync_time = Utc::now();
-
+                    
                     let _ = self.event_sender.send(ShadowEvent::OutputReceived(
-                        stream_message.instance_id,
+                        stream_message.instance_id, 
                         stream_message.data
                     ));
                 }
@@ -175,9 +175,9 @@ impl ShadowStateManager {
                 if let Some(shadow_state) = states.get_mut(&stream_message.instance_id) {
                     shadow_state.checkpoint_data = Some(stream_message.data.clone());
                     shadow_state.last_sync_time = Utc::now();
-
+                    
                     let _ = self.event_sender.send(ShadowEvent::CheckpointReceived(
-                        stream_message.instance_id,
+                        stream_message.instance_id, 
                         stream_message.data
                     ));
                 }
@@ -227,13 +227,13 @@ impl ShadowStateManager {
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(5)); // Sync every 5 seconds
-
+            
             loop {
                 interval.tick().await;
-
+                
                 if let Some(sender) = &network_sender {
                     let states_guard = states.read().await;
-
+                    
                     for (instance_id, shadow_state) in states_guard.iter() {
                         // Only sync if we have data to sync
                         if shadow_state.checkpoint_data.is_some() || !shadow_state.output_buffer.is_empty() {
@@ -251,7 +251,7 @@ impl ShadowStateManager {
                             };
 
                             let network_message = NetworkMessage::ShadowSync(sync_message);
-
+                            
                             if let Err(e) = sender.send(network_message) {
                                 error!("Failed to send periodic shadow sync: {}", e);
                             }

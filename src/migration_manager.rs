@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 use tokio::process::Command;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -360,7 +360,7 @@ impl ImageSyncManager {
     /// Find the PID of a restored process
     async fn find_restored_pid(&self, checkpoint_dir: &str) -> Result<u32> {
         // Read the pstree.img file to get the PID
-        let _pstree_file = format!("{}/pstree.img", checkpoint_dir);
+        let pstree_file = format!("{}/pstree.img", checkpoint_dir);
 
         // For now, use a simple approach - look for running processes
         // In a real implementation, you'd parse the CRIU image files
@@ -461,7 +461,7 @@ impl ImageSyncManager {
         instance: &crate::types::Instance,
         checkpoint_name: &str,
         checkpoint_dir: &PathBuf,
-        _network_manager: &Arc<NetworkManager>,
+        network_manager: &Arc<NetworkManager>,
         shadow_manager: &Arc<RwLock<ShadowInstanceManager>>,
     ) -> Result<()> {
         info!("Streaming checkpoint {} for instance {} to shadow nodes", checkpoint_name, instance.short_id());
@@ -682,7 +682,7 @@ impl MigrationManager {
                 migration_id,
                 instance_id,
                 source_node_id,
-                target_node_id: _,
+                target_node_id,
                 options
             } => {
                 self.handle_migration_request(migration_id, instance_id, source_node_id, options).await
@@ -697,7 +697,7 @@ impl MigrationManager {
                 migration_id,
                 instance_id,
                 source_node_id,
-                target_node_id: _,
+                target_node_id,
                 checkpoint_data
             } => {
                 self.handle_checkpoint_transfer(migration_id, instance_id, source_node_id, checkpoint_data).await
@@ -714,7 +714,7 @@ impl MigrationManager {
         migration_id: Uuid,
         instance_id: Uuid,
         source_node_id: NodeId,
-        _options: MigrationOptions,
+        options: MigrationOptions,
     ) -> Result<()> {
         info!("Received migration request for instance {} from node {}", instance_id, source_node_id);
 
@@ -1082,7 +1082,7 @@ impl MigrationManager {
     }
 
     /// Transfer checkpoint data to target node using dedicated Migration message
-    async fn stream_checkpoint_to_target(&self, instance: &crate::types::Instance, checkpoint_name: &str, _target_ip: &str, _target_port: u16) -> Result<()> {
+    async fn stream_checkpoint_to_target(&self, instance: &crate::types::Instance, checkpoint_name: &str, target_ip: &str, target_port: u16) -> Result<()> {
         let checkpoint_dir = PathBuf::from("instances")
             .join(format!("instance_{}", instance.short_id()))
             .join("checkpoints")

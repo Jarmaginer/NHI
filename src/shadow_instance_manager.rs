@@ -2,7 +2,7 @@ use crate::message_protocol::*;
 use crate::types::{Instance, InstanceStatus};
 use crate::instance::InstanceManager;
 use crate::process_manager::ProcessManager;
-use anyhow::Result;
+use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -176,9 +176,31 @@ impl ShadowInstanceManager {
             shadow_instance.created_at = instance_info.created_at;
             shadow_instance.pid = None; // Shadow instances don't have actual processes
 
+            // Ensure the instance directory structure is created for shadow instances
+            // This is crucial for proper directory structure including output/, logs/, etc.
+            let instance_short_id = shadow_instance.short_id();
+            let instance_dir = std::path::PathBuf::from("instances").join(format!("instance_{}", instance_short_id));
+
+            // Create all necessary subdirectories
+            let subdirs = ["checkpoints", "logs", "scripts", "output"];
+            for subdir in &subdirs {
+                let subdir_path = instance_dir.join(subdir);
+                if let Err(e) = std::fs::create_dir_all(&subdir_path) {
+                    warn!("Failed to create shadow instance subdirectory {}: {}", subdir_path.display(), e);
+                } else {
+                    debug!("Created shadow instance directory: {}", subdir_path.display());
+                }
+            }
+
+            // Update the instance directory paths to match the existing ID
+            shadow_instance.instance_dir = instance_dir.clone();
+            shadow_instance.metadata_file = instance_dir.join("metadata.json");
+
             // Save shadow instance metadata
             if let Err(e) = shadow_instance.save_metadata() {
                 warn!("Failed to save shadow instance metadata: {}", e);
+            } else {
+                debug!("Saved shadow instance metadata for {}", instance_short_id);
             }
 
             // Add to instance manager
@@ -326,7 +348,7 @@ impl ShadowInstanceManager {
     }
 
     /// Stream output data from a running instance to all shadow instances
-    pub async fn stream_output_to_shadows(&self, instance_id: Uuid, output_data: Vec<u8>, _stream_type: StreamType) -> Result<()> {
+    pub async fn stream_output_to_shadows(&self, instance_id: Uuid, output_data: Vec<u8>, stream_type: StreamType) -> Result<()> {
         if let Some(network_sender) = &self.network_sender {
             let data_version = self.get_next_data_version(instance_id).await;
             debug!("Streaming output to shadows: {} bytes, version {} for instance {}",
@@ -734,6 +756,17 @@ impl ShadowInstanceManager {
         // Ensure instance directory exists
         tokio::fs::create_dir_all(instance_dir).await?;
 
+        // Ensure output directory exists for the restored process
+        let output_dir = instance_dir.join("output");
+        tokio::fs::create_dir_all(&output_dir).await?;
+
+        // Create output file for the restored process
+        let output_file = output_dir.join("process_output.log");
+        if !output_file.exists() {
+            tokio::fs::File::create(&output_file).await?;
+            info!("📄 [RESTORE] Created output file for restored process: {}", output_file.display());
+        }
+
         // Use CRIU to restore the process with verbose output and correct working directory
         let mut cmd = Command::new("sudo");
         cmd.arg("/home/realgod/sync2/criu/criu/criu")
@@ -965,7 +998,7 @@ impl ShadowInstanceManager {
         Err(anyhow::anyhow!("Could not find restored PID - no simple_counter processes running"))
     }
 
-    async fn get_next_data_version(&self, _instance_id: Uuid) -> u64 {
+    async fn get_next_data_version(&self, instance_id: Uuid) -> u64 {
         // For source nodes, we need to track data versions separately
         // since they don't have shadow registry entries for their own instances
         static DATA_VERSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

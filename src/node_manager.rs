@@ -439,7 +439,7 @@ impl NodeManager {
             NetworkMessage::Response(response) => {
                 debug!("Received response from {}: {:?}", sender_id, response.response_type);
             }
-            NetworkMessage::Heartbeat(_heartbeat) => {
+            NetworkMessage::Heartbeat(heartbeat) => {
                 debug!("Received heartbeat from {}", sender_id);
                 // Update node's last seen time and status
                 if let Some(mut node_info) = cluster_state.get_node_info(&sender_id).await {

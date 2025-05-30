@@ -342,9 +342,9 @@ impl ProcessManager {
         &self,
         instance_id: Uuid,
         pid: u32,
-        _program: &str,
-        _args: &[String],
-        _working_dir: &PathBuf,
+        program: &str,
+        args: &[String],
+        working_dir: &PathBuf,
     ) -> Result<()> {
         info!("🔄 [MIGRATE_REG] Registering migrated process: PID {} for instance {}", pid, instance_id);
 
@@ -358,16 +358,27 @@ impl ProcessManager {
         } else {
             // Create output file path based on instance structure
             let instance_short_id = instance_id.to_string()[..8].to_string();
-            let output_file = PathBuf::from("instances")
-                .join(format!("instance_{}", instance_short_id))
-                .join("output")
-                .join("process_output.log");
+            let instance_dir = PathBuf::from("instances").join(format!("instance_{}", instance_short_id));
+            let output_dir = instance_dir.join("output");
+            let output_file = output_dir.join("process_output.log");
 
-            if output_file.exists() {
-                Some(output_file.to_string_lossy().to_string())
+            // Ensure output directory exists for migrated process
+            if let Err(e) = std::fs::create_dir_all(&output_dir) {
+                warn!("Failed to create output directory for migrated process: {}", e);
+            }
+
+            // Create output file if it doesn't exist
+            if !output_file.exists() {
+                if let Err(e) = std::fs::File::create(&output_file) {
+                    warn!("Failed to create output file for migrated process: {}", e);
+                    None
+                } else {
+                    info!("📄 [MIGRATE_REG] Created output file for migrated process: {}", output_file.display());
+                    Some(output_file.to_string_lossy().to_string())
+                }
             } else {
-                warn!("⚠️ [MIGRATE_REG] No output file found for migrated process {}", pid);
-                None
+                info!("📄 [MIGRATE_REG] Found existing output file for migrated process: {}", output_file.display());
+                Some(output_file.to_string_lossy().to_string())
             }
         };
 
@@ -382,7 +393,7 @@ impl ProcessManager {
             Some(tokio::spawn(async move {
                 // Monitor the output file for changes
                 let mut last_size = 0;
-                let file_path = PathBuf::from(&output_file);
+                let mut file_path = PathBuf::from(&output_file);
 
                 loop {
                     if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
@@ -505,7 +516,7 @@ impl ProcessManager {
         &self,
         instance_id: Uuid,
         pid: u32,
-        _restored_history: Option<Vec<String>>,
+        restored_history: Option<Vec<String>>,
     ) -> Result<()> {
         // For restored processes, we need to attach to the existing process
         // We can't capture stdout/stderr from an already running process easily,
@@ -911,7 +922,7 @@ sleep 0.1
                                     // Check if this process was recently started (within last 10 seconds)
                                     let parts: Vec<&str> = stat_content.split_whitespace().collect();
                                     if parts.len() > 21 {
-                                        if let Ok(_starttime) = parts[21].parse::<u64>() {
+                                        if let Ok(starttime) = parts[21].parse::<u64>() {
                                             // This is a more reliable way to find the actual process
                                             matching_processes.push(pid);
                                             info!("Found candidate process: PID {} with cmdline: {}", pid, cmdline.replace('\0', " "));
