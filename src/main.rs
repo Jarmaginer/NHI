@@ -38,9 +38,12 @@ use uuid::Uuid;
 use colors::ColorScheme;
 // Stage 2: Networking imports
 use message_protocol::NetworkConfig;
+use network_manager::NetworkManager;
 use node_manager::NodeManager;
 // Stage 3: Shadow state imports
 use shadow_instance_manager::ShadowInstanceManager;
+// Stage 4: Migration imports
+use migration_manager::MigrationManager;
 
 #[derive(Parser)]
 #[command(name = "nhi")]
@@ -89,7 +92,8 @@ async fn main() -> Result<()> {
     let shadow_manager = if !args.no_network {
         Some(Arc::new(tokio::sync::RwLock::new(ShadowInstanceManager::new(
             uuid::Uuid::new_v4(), // Will be updated with actual node ID
-            instance_manager.clone()
+            instance_manager.clone(),
+            process_manager.clone()
         ))))
     } else {
         None
@@ -104,7 +108,7 @@ async fn main() -> Result<()> {
                 format!("nhi-node-{}", uuid::Uuid::new_v4().to_string()[..8].to_uppercase())
             }),
             discovery_port: args.discovery_port,
-            heartbeat_interval_secs: 10,  // 更频繁的心跳
+            heartbeat_interval_secs: 5,   // 更频繁的心跳，5秒间隔
             connection_timeout_secs: 10,
             max_connections: 100,
         };
@@ -127,7 +131,7 @@ async fn main() -> Result<()> {
                 let node_id = node_manager.node_id();
                 let mut shadow_mgr_write = shadow_mgr.write().await;
                 // Create a new shadow manager with the correct node ID
-                let mut new_shadow_mgr = ShadowInstanceManager::new(node_id, instance_manager.clone());
+                let mut new_shadow_mgr = ShadowInstanceManager::new(node_id, instance_manager.clone(), process_manager.clone());
 
                 // Set up network sender for shadow manager
                 let network_sender = node_manager.network_manager().get_sender();
@@ -153,10 +157,70 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Initialize migration manager (Stage 4)
+    let migration_manager = if !args.no_network {
+        if let Some(ref node_mgr) = node_manager {
+            let mut mgr = MigrationManager::new(
+                node_mgr.node_id(),
+                node_mgr.network_manager().clone(),
+                instance_manager.clone(),
+                process_manager.clone(),
+            );
+
+            // Set shadow manager if available
+            if let Some(ref shadow_mgr) = shadow_manager {
+                mgr.set_shadow_manager(shadow_mgr.clone());
+            }
+
+            // Start the migration manager
+            if let Err(e) = mgr.start().await {
+                warn!("Failed to start migration manager: {}", e);
+                None
+            } else {
+                Some(Arc::new(mgr))
+            }
+        } else {
+            // Even in standalone mode, create a basic migration manager for checkpoint functionality
+            warn!("Creating standalone migration manager for checkpoint functionality");
+            let dummy_node_id = uuid::Uuid::new_v4();
+            let dummy_config = NetworkConfig {
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+                node_name: "standalone".to_string(),
+                discovery_port: 0,
+                heartbeat_interval_secs: 30,
+                connection_timeout_secs: 10,
+                max_connections: 1,
+            };
+            let dummy_network_manager = Arc::new(NetworkManager::new(dummy_config, dummy_node_id));
+
+            let mut mgr = MigrationManager::new(
+                dummy_node_id,
+                dummy_network_manager,
+                instance_manager.clone(),
+                process_manager.clone(),
+            );
+
+            // Start the migration manager (mainly for checkpoint functionality)
+            if let Err(e) = mgr.start().await {
+                warn!("Failed to start standalone migration manager: {}", e);
+                None
+            } else {
+                Some(Arc::new(mgr))
+            }
+        }
+    } else {
+        None
+    };
+
     // Set up shadow manager in node manager and process manager if available
     if let (Some(ref node_mgr), Some(ref shadow_mgr)) = (&node_manager, &shadow_manager) {
         node_mgr.set_shadow_manager(shadow_mgr.clone()).await;
         process_manager.set_shadow_manager(shadow_mgr.clone()).await;
+    }
+
+    // Set up migration manager in node manager if available
+    if let (Some(ref node_mgr), Some(ref migration_mgr)) = (&node_manager, &migration_manager) {
+        node_mgr.set_migration_manager(migration_mgr.clone()).await;
     }
 
     // Create readline editor
@@ -203,6 +267,7 @@ async fn main() -> Result<()> {
                             &criu_manager,
                             &node_manager,
                             &shadow_manager,
+                            &migration_manager,
                         ).await {
                             Ok(_) => {},
                             Err(e) => {
@@ -250,6 +315,7 @@ async fn main() -> Result<()> {
                         &criu_manager,
                         &node_manager,
                         &shadow_manager,
+                        &migration_manager,
                     ).await {
                         Ok(should_exit) => {
                             if should_exit {
@@ -298,6 +364,7 @@ async fn execute_command(
     criu_manager: &Arc<CriuManager>,
     node_manager: &Option<Arc<NodeManager>>,
     shadow_manager: &Option<Arc<tokio::sync::RwLock<ShadowInstanceManager>>>,
+    migration_manager: &Option<Arc<MigrationManager>>,
 ) -> Result<bool> {
     let command = CliCommand::parse_from_str(input)?;
 
@@ -812,17 +879,37 @@ async fn execute_command(
                             ColorScheme::info(&format!("to node {}", target_node_id))
                         );
 
-                        // TODO: Implement actual migration execution
-                        // This would involve:
-                        // 1. Creating MigrationExecutor
-                        // 2. Executing source migration
-                        // 3. Coordinating with target node
-                        // 4. Updating instance registry
+                        // Use migration manager to initiate migration
+                        if let Some(ref migration_mgr) = migration_manager {
+                            // Use default migration options
+                            let options = crate::migration_manager::MigrationOptions::default();
 
-                        println!("{} {}",
-                            ColorScheme::success_indicator("Success:"),
-                            ColorScheme::success("Migration request initiated (implementation in progress)")
-                        );
+                            // Initiate migration
+                            match migration_mgr.migrate_instance(&instance_id, target_uuid, options).await {
+                                Ok(migration_id) => {
+                                    println!("{} {} {}",
+                                        ColorScheme::success_indicator("Success:"),
+                                        ColorScheme::success("Migration request initiated with ID:"),
+                                        ColorScheme::info(&migration_id.to_string()[..8])
+                                    );
+                                    println!("{} {}",
+                                        ColorScheme::info_indicator("Note:"),
+                                        ColorScheme::info("Migration is running in the background. Use 'list' to check status.")
+                                    );
+                                }
+                                Err(e) => {
+                                    println!("{} {}",
+                                        ColorScheme::error_indicator("Error:"),
+                                        ColorScheme::error(&format!("Failed to initiate migration: {}", e))
+                                    );
+                                }
+                            }
+                        } else {
+                            println!("{} {}",
+                                ColorScheme::warning_indicator("Warning:"),
+                                ColorScheme::warning("Migration manager is not available.")
+                            );
+                        }
                     }
                     Err(_) => {
                         println!("{} {}",

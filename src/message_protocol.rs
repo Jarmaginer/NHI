@@ -290,13 +290,39 @@ pub struct ShadowInputMessage {
 
 /// Migration coordination message
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MigrationMessage {
-    pub sender_id: NodeId,
-    pub migration_type: MigrationType,
-    pub instance_id: Uuid,
-    pub target_node_id: Option<NodeId>,
-    pub migration_id: Uuid,
-    pub timestamp: DateTime<Utc>,
+pub enum MigrationMessage {
+    /// Request to migrate instance to target node
+    MigrationRequest {
+        migration_id: Uuid,
+        instance_id: Uuid,
+        source_node_id: NodeId,
+        target_node_id: NodeId,
+        options: crate::migration_manager::MigrationOptions,
+    },
+    /// Accept migration request
+    MigrationAccept {
+        migration_id: Uuid,
+        target_port: u16,
+    },
+    /// Reject migration request
+    MigrationReject {
+        migration_id: Uuid,
+        reason: String,
+    },
+    /// Transfer checkpoint data for migration
+    CheckpointTransfer {
+        migration_id: Uuid,
+        instance_id: Uuid,
+        source_node_id: NodeId,
+        target_node_id: NodeId,
+        checkpoint_data: Vec<u8>,
+    },
+    /// Migration completed
+    MigrationComplete {
+        migration_id: Uuid,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 /// Real-time data streaming message
@@ -310,22 +336,7 @@ pub struct DataStreamMessage {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Types of migration operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MigrationType {
-    /// Request to migrate instance to target node
-    MigrateRequest,
-    /// Accept migration request
-    MigrateAccept,
-    /// Reject migration request
-    MigrateReject { reason: String },
-    /// Start migration process
-    MigrateStart,
-    /// Migration completed successfully
-    MigrateComplete,
-    /// Migration failed
-    MigrateFailed { reason: String },
-}
+
 
 /// Types of data streams
 #[derive(Debug, Clone, Serialize, Deserialize)]

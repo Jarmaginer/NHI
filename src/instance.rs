@@ -561,6 +561,11 @@ impl InstanceManager {
         self.resolve_instance_id(instance_id_str).is_ok()
     }
 
+    /// Get all instances as a vector
+    pub fn get_all_instances(&self) -> Vec<Instance> {
+        self.instances.values().cloned().collect()
+    }
+
     /// Get instance by ID (read-only)
     pub fn get_instance_by_id(&self, instance_id_str: &str) -> Option<&Instance> {
         if let Ok(instance_id) = self.resolve_instance_id(instance_id_str) {

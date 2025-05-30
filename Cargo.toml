@@ -24,6 +24,8 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 bytes = "1.0"
 bincode = "1.3"
+flate2 = "1.0"
+tar = "0.4"
 
 # CRIU integration
 rust-criu = { path = "../rust-criu" }

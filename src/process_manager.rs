@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use std::fs::File;
@@ -335,6 +335,118 @@ impl ProcessManager {
             .iter()
             .map(|(id, info)| (*id, info.pid))
             .collect()
+    }
+
+    /// Register a migrated process with the process manager
+    pub async fn register_migrated_process(
+        &self,
+        instance_id: Uuid,
+        pid: u32,
+        program: &str,
+        args: &[String],
+        working_dir: &PathBuf,
+    ) -> Result<()> {
+        info!("🔄 [MIGRATE_REG] Registering migrated process: PID {} for instance {}", pid, instance_id);
+
+        // Create a dummy child process handle for the migrated process
+        // Since we can't create a real Child from an existing PID, we'll create a minimal ProcessInfo
+        let output_history = Arc::new(Mutex::new(Vec::new()));
+
+        // Try to find and monitor the output file for this migrated process
+        let output_file_path = if let Some(output_file) = self.find_output_file_for_pid(pid).await {
+            Some(output_file)
+        } else {
+            // Create output file path based on instance structure
+            let instance_short_id = instance_id.to_string()[..8].to_string();
+            let output_file = PathBuf::from("instances")
+                .join(format!("instance_{}", instance_short_id))
+                .join("output")
+                .join("process_output.log");
+
+            if output_file.exists() {
+                Some(output_file.to_string_lossy().to_string())
+            } else {
+                warn!("⚠️ [MIGRATE_REG] No output file found for migrated process {}", pid);
+                None
+            }
+        };
+
+        // Start output monitoring for the migrated process if we found an output file
+        let (output_sender, _) = tokio::sync::broadcast::channel::<String>(1000);
+        let output_monitor = if let Some(output_file) = output_file_path {
+            let output_history_clone = output_history.clone();
+            let output_sender_clone = output_sender.clone();
+
+            info!("📄 [MIGRATE_REG] Starting output monitoring for migrated process from file: {}", output_file);
+
+            Some(tokio::spawn(async move {
+                // Monitor the output file for changes
+                let mut last_size = 0;
+                let mut file_path = PathBuf::from(&output_file);
+
+                loop {
+                    if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
+                        let current_size = metadata.len();
+                        if current_size > last_size {
+                            // Read new content
+                            if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+                                let lines: Vec<&str> = content.lines().collect();
+                                let start_line = (last_size as f64 / 50.0) as usize; // Rough estimate
+
+                                for line in lines.iter().skip(start_line) {
+                                    let line_str = line.to_string();
+
+                                    // Add to history
+                                    {
+                                        let mut history = output_history_clone.lock().await;
+                                        history.push(line_str.clone());
+                                        if history.len() > 1000 {
+                                            history.remove(0);
+                                        }
+                                    }
+
+                                    // Send to subscribers
+                                    if output_sender_clone.send(line_str).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            last_size = current_size;
+                        }
+                    }
+
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Create a dummy child that represents the migrated process
+        // We can't control this process directly, but we can monitor it
+        let dummy_child = tokio::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .map_err(|e| CriuCliError::ProcessError(format!("Failed to create dummy child: {}", e)))?;
+
+        let process_info = ProcessInfo {
+            pid,
+            child: dummy_child,
+            output_history,
+            stdout_handle: output_monitor,
+            stderr_handle: None,
+            output_sender: Some(output_sender),
+            stdin_sender: None, // Migrated processes don't support stdin by default
+        };
+
+        // Register the process
+        {
+            let mut processes = self.processes.lock().await;
+            processes.insert(instance_id, process_info);
+        }
+
+        info!("✅ [MIGRATE_REG] Successfully registered migrated process {} for instance {}", pid, instance_id);
+        Ok(())
     }
 
     pub async fn get_output_history(&self, instance_id: &Uuid) -> Option<Vec<String>> {

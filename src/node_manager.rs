@@ -1,5 +1,6 @@
 use crate::cluster_state::{ClusterEvent, ClusterStateManager};
 use crate::message_protocol::*;
+use crate::migration_manager::MigrationManager;
 use crate::network_manager::{NetworkEvent, NetworkManager};
 use crate::node_discovery::{DiscoveryEvent, NodeDiscovery};
 use crate::shadow_instance_manager::ShadowInstanceManager;
@@ -19,6 +20,7 @@ pub struct NodeManager {
     local_node_info: NodeInfo,
     is_running: Arc<Mutex<bool>>,
     shadow_manager: Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
+    migration_manager: Arc<Mutex<Option<Arc<MigrationManager>>>>,
 }
 
 impl NodeManager {
@@ -44,6 +46,7 @@ impl NodeManager {
             local_node_info,
             is_running: Arc::new(Mutex::new(false)),
             shadow_manager: Arc::new(Mutex::new(None)),
+            migration_manager: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -128,6 +131,12 @@ impl NodeManager {
         *mgr = Some(shadow_manager);
     }
 
+    /// Set migration manager for handling migration messages
+    pub async fn set_migration_manager(&self, migration_manager: Arc<MigrationManager>) {
+        let mut mgr = self.migration_manager.lock().await;
+        *mgr = Some(migration_manager);
+    }
+
     /// Connect to a specific peer
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
         info!("Attempting to connect to peer at {}", addr);
@@ -166,12 +175,13 @@ impl NodeManager {
         let network_manager = self.network_manager.clone();
         let cluster_state = self.cluster_state.clone();
         let shadow_manager = self.shadow_manager.clone();
+        let migration_manager = self.migration_manager.clone();
         let is_running = self.is_running.clone();
 
         tokio::spawn(async move {
             while *is_running.lock().await {
                 if let Some(event) = network_manager.next_event().await {
-                    if let Err(e) = Self::handle_network_event(event, &cluster_state, &network_manager, &shadow_manager).await {
+                    if let Err(e) = Self::handle_network_event(event, &cluster_state, &network_manager, &shadow_manager, &migration_manager).await {
                         error!("Error handling network event: {}", e);
                     }
                 }
@@ -302,6 +312,7 @@ impl NodeManager {
         cluster_state: &Arc<ClusterStateManager>,
         network_manager: &Arc<NetworkManager>,
         shadow_manager: &Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
+        migration_manager: &Arc<Mutex<Option<Arc<MigrationManager>>>>,
     ) -> Result<()> {
         match event {
             NetworkEvent::PeerConnected(node_id, addr) => {
@@ -309,6 +320,23 @@ impl NodeManager {
 
                 // Update cluster state
                 cluster_state.update_node_status(&node_id, NodeStatus::Online).await?;
+
+                // Send immediate heartbeat to establish connection faster
+                let heartbeat = HeartbeatMessage {
+                    sender_id: cluster_state.local_node_id(),
+                    timestamp: chrono::Utc::now(),
+                    load_info: crate::message_protocol::NodeLoadInfo {
+                        cpu_usage: 0.0,
+                        memory_usage: 0.0,
+                        active_instances: 0,
+                        network_connections: 1,
+                    },
+                };
+
+                let heartbeat_msg = NetworkMessage::Heartbeat(heartbeat);
+                if let Err(e) = network_manager.send_to_peer(&node_id, heartbeat_msg).await {
+                    warn!("Failed to send immediate heartbeat to {}: {}", node_id, e);
+                }
             }
             NetworkEvent::PeerDisconnected(node_id, reason) => {
                 info!("Peer disconnected: {} ({})", node_id, reason);
@@ -318,7 +346,7 @@ impl NodeManager {
                 cluster_state.update_node_status(&node_id, NodeStatus::Offline).await?;
             }
             NetworkEvent::MessageReceived(sender_id, message) => {
-                Self::handle_network_message(sender_id, message, cluster_state, network_manager, shadow_manager).await?;
+                Self::handle_network_message(sender_id, message, cluster_state, network_manager, shadow_manager, migration_manager).await?;
             }
             NetworkEvent::ConnectionError(addr, error) => {
                 warn!("Connection error to {}: {}", addr, error);
@@ -389,6 +417,7 @@ impl NodeManager {
         cluster_state: &Arc<ClusterStateManager>,
         network_manager: &Arc<NetworkManager>,
         shadow_manager: &Arc<Mutex<Option<Arc<RwLock<ShadowInstanceManager>>>>>,
+        migration_manager: &Arc<Mutex<Option<Arc<MigrationManager>>>>,
     ) -> Result<()> {
         match message {
             NetworkMessage::Discovery(discovery) => {
@@ -419,8 +448,22 @@ impl NodeManager {
                     cluster_state.add_node(node_info).await?;
                     debug!("Updated heartbeat for node {}", sender_id);
                 } else {
-                    // If we don't have this node, it might be a new connection
+                    // If we don't have this node, create a basic node info and add it
                     warn!("Received heartbeat from unknown node: {}", sender_id);
+
+                    // Create a basic node info from the heartbeat
+                    let node_info = NodeInfo::new(
+                        sender_id,
+                        format!("node{}", sender_id.to_string()[..8].to_uppercase()),
+                        "0.0.0.0:0".parse().unwrap(), // Will be updated when we get proper discovery
+                    );
+
+                    // Add to cluster state - this will trigger the node joined event
+                    if let Err(e) = cluster_state.add_node(node_info).await {
+                        warn!("Failed to add unknown node {} from heartbeat: {}", sender_id, e);
+                    } else {
+                        info!("Added node {} from remote state", sender_id);
+                    }
                 }
             }
             NetworkMessage::Goodbye(goodbye) => {
@@ -467,9 +510,16 @@ impl NodeManager {
                            shadow_input.input_data, shadow_input.instance_id);
                 }
             }
-            NetworkMessage::Migration(_migration) => {
-                // TODO: Handle migration coordination
+            NetworkMessage::Migration(migration) => {
                 debug!("Received migration message from {}", sender_id);
+                // Forward to migration manager if available
+                if let Some(migration_mgr) = migration_manager.lock().await.as_ref() {
+                    if let Err(e) = migration_mgr.handle_migration_message(migration).await {
+                        error!("Failed to handle migration message: {}", e);
+                    }
+                } else {
+                    warn!("Migration manager not available, ignoring migration message");
+                }
             }
             NetworkMessage::DataStream(_data_stream) => {
                 // TODO: Handle real-time data streaming
