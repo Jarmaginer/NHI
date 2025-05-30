@@ -996,13 +996,7 @@ impl MigrationManager {
             return Err(anyhow::anyhow!("Empty checkpoint data received"));
         }
 
-        // Log first few bytes for debugging
-        let preview = if checkpoint_data.len() >= 16 {
-            format!("{:02x?}", &checkpoint_data[0..16])
-        } else {
-            format!("{:02x?}", &checkpoint_data)
-        };
-        info!("🔍 [MIGRATION] Checkpoint data preview (first 16 bytes): {}", preview);
+        debug!("Received checkpoint data: {} bytes", checkpoint_data.len());
 
         // Save checkpoint data to shadow instance using the same mechanism as auto-sync
         if let Some(shadow_mgr) = &self.shadow_manager {
@@ -1102,20 +1096,7 @@ impl MigrationManager {
             return Err(anyhow::anyhow!("Checkpoint directory not found: {:?}", checkpoint_dir));
         }
 
-        // List files in checkpoint directory for debugging
-        match tokio::fs::read_dir(&checkpoint_dir).await {
-            Ok(mut entries) => {
-                info!("📁 [MIGRATION] Files in checkpoint directory:");
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    if let Ok(metadata) = entry.metadata().await {
-                        info!("  📄 {} ({} bytes)", entry.file_name().to_string_lossy(), metadata.len());
-                    }
-                }
-            }
-            Err(e) => {
-                error!("❌ [MIGRATION] Failed to read checkpoint directory: {}", e);
-            }
-        }
+        debug!("Created migration checkpoint: {:?}", checkpoint_dir);
 
         info!("🔄 [MIGRATION] Reading checkpoint data using ImageSyncManager...");
 
@@ -1136,15 +1117,7 @@ impl MigrationManager {
             return Err(anyhow::anyhow!("No checkpoint data found"));
         }
 
-        // Log first few bytes for debugging
-        let preview = if checkpoint_data.len() >= 16 {
-            format!("{:02x?}", &checkpoint_data[0..16])
-        } else {
-            format!("{:02x?}", &checkpoint_data)
-        };
-        info!("🔍 [MIGRATION] Checkpoint data preview (first 16 bytes): {}", preview);
-
-        info!("📡 [MIGRATION] Creating Migration message for transmission...");
+        debug!("Sending checkpoint data: {} bytes", checkpoint_data.len());
 
         // Send dedicated Migration message with checkpoint data
         let network_manager = &self.network_manager;

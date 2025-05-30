@@ -218,38 +218,19 @@ impl ShadowInstanceManager {
         // Check if we have a running instance that should be demoted to shadow
         {
             let instance_manager = self.instance_manager.lock().await;
-            info!("🔍 [SHADOW_SYNC] Checking for existing running instance: {}", instance_id);
 
-            // Debug: List all instances in memory
-            let all_instances = instance_manager.get_all_instances();
-            info!("🔍 [SHADOW_SYNC] Total instances in memory: {}", all_instances.len());
-            for inst in &all_instances {
-                info!("🔍 [SHADOW_SYNC] Memory instance: {} ({}), status: {:?}",
-                      inst.short_id(), inst.id, inst.status);
-            }
-
-            // Try multiple ways to find the instance
+            // Try to find the instance by both full and short ID
             let instance_id_str = instance_id.to_string();
-            let short_id = &instance_id_str[0..8]; // First 8 chars
+            let short_id = &instance_id_str[0..8];
 
-            info!("🔍 [SHADOW_SYNC] Searching for instance with full ID: {}", instance_id_str);
-            info!("🔍 [SHADOW_SYNC] Searching for instance with short ID: {}", short_id);
-
-            // Try full UUID
             let existing_instance = instance_manager.get_instance_by_id(&instance_id_str)
-                .or_else(|| {
-                    info!("🔍 [SHADOW_SYNC] Full UUID search failed, trying short ID");
-                    instance_manager.get_instance_by_id(short_id)
-                });
+                .or_else(|| instance_manager.get_instance_by_id(short_id));
 
             if let Some(existing_instance) = existing_instance {
-                info!("🔍 [SHADOW_SYNC] Found existing instance {} with status {:?}",
-                      instance_id, existing_instance.status);
-
                 // If we have a running instance and receive shadow sync from another node,
                 // this means our instance was migrated and we should convert to shadow
                 if existing_instance.status == InstanceStatus::Running {
-                    info!("🔄 [SHADOW_SYNC] Instance {} is now running on node {}, converting local to shadow",
+                    info!("Instance {} migrated to node {}, converting local to shadow",
                           instance_id, sender_id);
 
                     // Drop the lock before calling demote function
@@ -257,18 +238,10 @@ impl ShadowInstanceManager {
 
                     // Convert our running instance to shadow
                     if let Err(e) = self.demote_running_to_shadow(instance_id, sender_id).await {
-                        error!("❌ [SHADOW_SYNC] Failed to demote running instance to shadow: {}", e);
+                        error!("Failed to demote running instance to shadow: {}", e);
                         return Err(e);
-                    } else {
-                        info!("✅ [SHADOW_SYNC] Successfully converted running instance {} to shadow", instance_id);
-                        // Continue with normal shadow sync processing
                     }
-                } else {
-                    info!("ℹ️ [SHADOW_SYNC] Instance {} already exists locally with status {:?}, continuing with shadow sync",
-                           instance_id, existing_instance.status);
                 }
-            } else {
-                info!("ℹ️ [SHADOW_SYNC] No existing instance found for {} (tried both full and short ID), will create new shadow", instance_id);
             }
         }
 
@@ -574,51 +547,21 @@ impl ShadowInstanceManager {
         use std::io::Read;
         use flate2::read::GzDecoder;
 
-        info!("💾 [RECEIVE] Starting to save checkpoint data for instance {}", instance_id);
-        info!("📦 [RECEIVE] Checkpoint data size: {} bytes ({:.2} KB)", checkpoint_data.len(), checkpoint_data.len() as f64 / 1024.0);
-
-        // Log first few bytes for debugging
-        let preview = if checkpoint_data.len() >= 16 {
-            format!("{:02x?}", &checkpoint_data[0..16])
-        } else {
-            format!("{:02x?}", &checkpoint_data)
-        };
-        info!("🔍 [RECEIVE] Checkpoint data preview (first 16 bytes): {}", preview);
+        debug!("Saving checkpoint data for instance {}: {} bytes", instance_id, checkpoint_data.len());
 
         // Create instance directory (same structure as running instances)
         let instance_short_id = instance_id.to_string()[..8].to_string();
         let instance_dir = PathBuf::from("instances").join(format!("instance_{}", instance_short_id));
         let checkpoint_dir = instance_dir.join("checkpoints").join(format!("sync-{}", chrono::Utc::now().timestamp()));
 
-        info!("📁 [RECEIVE] Creating checkpoint directory: {:?}", checkpoint_dir);
-
-        match tokio::fs::create_dir_all(&checkpoint_dir).await {
-            Ok(_) => {
-                info!("✅ [RECEIVE] Successfully created checkpoint directory");
-            }
-            Err(e) => {
-                error!("❌ [RECEIVE] Failed to create checkpoint directory: {}", e);
-                return Err(e.into());
-            }
-        }
+        tokio::fs::create_dir_all(&checkpoint_dir).await?;
 
         // Decompress and extract checkpoint files
-        info!("🔄 [RECEIVE] Decompressing checkpoint data...");
         let mut decoder = GzDecoder::new(checkpoint_data);
         let mut decompressed_data = Vec::new();
-
-        match decoder.read_to_end(&mut decompressed_data) {
-            Ok(bytes_read) => {
-                info!("✅ [RECEIVE] Successfully decompressed {} bytes to {} bytes", checkpoint_data.len(), bytes_read);
-            }
-            Err(e) => {
-                error!("❌ [RECEIVE] Failed to decompress checkpoint data: {}", e);
-                return Err(e.into());
-            }
-        }
+        decoder.read_to_end(&mut decompressed_data)?;
 
         // Parse the decompressed data and extract files
-        info!("🔄 [RECEIVE] Parsing and extracting checkpoint files...");
         let mut cursor = std::io::Cursor::new(decompressed_data);
         let mut file_count = 0;
 
@@ -626,7 +569,6 @@ impl ShadowInstanceManager {
             // Read file name length
             let mut name_len_buf = [0u8; 4];
             if cursor.read_exact(&mut name_len_buf).is_err() {
-                info!("ℹ️ [RECEIVE] Reached end of checkpoint data");
                 break; // End of data
             }
             let name_len = u32::from_le_bytes(name_len_buf) as usize;
@@ -647,19 +589,11 @@ impl ShadowInstanceManager {
 
             // Write file to checkpoint directory
             let file_path = checkpoint_dir.join(&file_name);
-            match tokio::fs::write(&file_path, &file_data).await {
-                Ok(_) => {
-                    info!("📄 [RECEIVE] Extracted checkpoint file: {} ({} bytes)", file_name, data_len);
-                    file_count += 1;
-                }
-                Err(e) => {
-                    error!("❌ [RECEIVE] Failed to write file {}: {}", file_name, e);
-                    return Err(e.into());
-                }
-            }
+            tokio::fs::write(&file_path, &file_data).await?;
+            file_count += 1;
         }
 
-        info!("✅ [RECEIVE] Successfully extracted {} checkpoint files", file_count);
+        debug!("Extracted {} checkpoint files for instance {}", file_count, instance_id);
 
         info!("Saved checkpoint data for shadow instance {} to {:?}", instance_short_id, checkpoint_dir);
         Ok(())

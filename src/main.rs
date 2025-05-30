@@ -27,6 +27,8 @@ mod migration_manager;
 mod streaming_manager;
 mod migration_executor;
 mod shadow_instance_manager;
+mod logger;
+mod output;
 
 use cli::{CliCommand, CliState};
 use instance::InstanceManager;
@@ -44,6 +46,8 @@ use node_manager::NodeManager;
 use shadow_instance_manager::ShadowInstanceManager;
 // Stage 4: Migration imports
 use migration_manager::MigrationManager;
+use crate::logger;
+use crate::output::Output;
 
 #[derive(Parser)]
 #[command(name = "nhi")]
@@ -73,12 +77,15 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(&args.log_level)
-        .init();
+    // Initialize logging system
+    let log_dir = logger::default_log_dir();
+    if let Err(e) = logger::init_logging(&log_dir) {
+        eprintln!("Failed to initialize logging: {}", e);
+        std::process::exit(1);
+    }
 
     info!("Starting NHI");
+    Output::header("NHI v0.1.0 - Starting Up");
 
     // Initialize managers
     let process_manager = Arc::new(ProcessManager::new());
@@ -118,10 +125,7 @@ async fn main() -> Result<()> {
         // Start networking
         if let Err(e) = node_manager.start().await {
             error!("Failed to start networking: {}", e);
-            println!("{} {}",
-                ColorScheme::warning_indicator("Warning:"),
-                ColorScheme::warning("Failed to start networking, running in standalone mode")
-            );
+            Output::warning("Failed to start networking, running in standalone mode");
             None
         } else {
             info!("Networking started successfully");
@@ -140,20 +144,14 @@ async fn main() -> Result<()> {
                 *shadow_mgr_write = new_shadow_mgr;
             }
 
-            println!("{} {}",
-                ColorScheme::success_indicator("Network:"),
-                ColorScheme::info(&format!("Node {} listening on {}",
-                    node_manager.node_id().to_string()[..8].to_uppercase(),
-                    node_manager.local_node_info().listen_addr
-                ))
-            );
+            Output::network(&format!("Node {} listening on {}",
+                node_manager.node_id().to_string()[..8].to_uppercase(),
+                node_manager.local_node_info().listen_addr
+            ));
             Some(node_manager)
         }
     } else {
-        println!("{} {}",
-            ColorScheme::info_indicator("Mode:"),
-            ColorScheme::info("Running in standalone mode (networking disabled)")
-        );
+        Output::info("Running in standalone mode (networking disabled)");
         None
     };
 
@@ -226,8 +224,8 @@ async fn main() -> Result<()> {
     // Create readline editor
     let mut rl = DefaultEditor::new()?;
 
-    println!("{}", ColorScheme::header("NHI v0.1.0"));
-    println!("{}", ColorScheme::info("Type 'help' for available commands or 'exit' to quit."));
+    Output::header("NHI v0.1.0 - Ready");
+    Output::info("Type 'help' for available commands or 'exit' to quit.");
 
     loop {
         let prompt = {
@@ -380,7 +378,7 @@ async fn execute_command(
                     warn!("Error during node manager shutdown: {}", e);
                 }
             }
-            println!("{}", ColorScheme::success("Goodbye!"));
+            Output::success("Goodbye!");
             Ok(true)
         }
         CliCommand::Start { program, args } => {
@@ -400,25 +398,16 @@ async fn execute_command(
                 (instance_id, instance)
             };
 
-            println!("{} {}",
-                ColorScheme::success_indicator("Started instance:"),
-                ColorScheme::instance_id(&instance_id)
-            );
+            Output::instance(&format!("Started instance: {}", instance_id));
 
             // Broadcast instance creation to other nodes if networking is enabled
             if let Some(ref shadow_mgr) = shadow_manager {
                 let shadow_mgr_read = shadow_mgr.read().await;
                 if let Err(e) = shadow_mgr_read.broadcast_instance_creation(&instance).await {
                     warn!("Failed to broadcast instance creation: {}", e);
-                    println!("{} {}",
-                        ColorScheme::warning_indicator("Warning:"),
-                        ColorScheme::warning("Failed to notify other nodes about instance creation")
-                    );
+                    Output::warning("Failed to notify other nodes about instance creation");
                 } else {
-                    println!("{} {}",
-                        ColorScheme::info_indicator("Broadcast:"),
-                        ColorScheme::info("Instance creation broadcasted to cluster")
-                    );
+                    Output::network("Instance creation broadcasted to cluster");
                 }
             }
 
