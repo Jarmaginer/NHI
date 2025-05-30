@@ -1,6 +1,6 @@
 use crate::message_protocol::*;
 use anyhow::Result;
-use std::collections::HashMap;
+
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
@@ -33,7 +33,7 @@ pub struct ClusterStateManager {
 impl ClusterStateManager {
     pub fn new(local_node_id: NodeId) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
+
         Self {
             local_node_id,
             cluster_state: Arc::new(RwLock::new(ClusterState::new())),
@@ -51,10 +51,10 @@ impl ClusterStateManager {
     pub async fn add_local_node(&self, node_info: NodeInfo) -> Result<()> {
         let mut state = self.cluster_state.write().await;
         state.add_node(node_info.clone());
-        
+
         info!("Added local node {} to cluster", node_info.node_id);
         let _ = self.event_sender.send(ClusterEvent::NodeJoined(node_info));
-        
+
         Ok(())
     }
 
@@ -135,7 +135,7 @@ impl ClusterStateManager {
     /// Get cluster statistics
     pub async fn get_cluster_stats(&self) -> ClusterStats {
         let state = self.cluster_state.read().await;
-        
+
         let total_nodes = state.node_count();
         let online_nodes = state.online_node_count();
         let offline_nodes = total_nodes - online_nodes;
@@ -153,10 +153,10 @@ impl ClusterStateManager {
     /// Synchronize cluster state with remote state
     pub async fn synchronize_state(&self, remote_state: ClusterState) -> Result<()> {
         let mut conflicts = Vec::new();
-        
+
         {
             let mut local_state = self.cluster_state.write().await;
-            
+
             // Check for conflicts and merge states
             for (node_id, remote_node) in &remote_state.nodes {
                 if let Some(local_node) = local_state.nodes.get(node_id) {
@@ -172,7 +172,7 @@ impl ClusterStateManager {
                         // Same timestamp, check for actual differences
                         if local_node != remote_node {
                             conflicts.push(format!(
-                                "Node {} has conflicting state with same timestamp", 
+                                "Node {} has conflicting state with same timestamp",
                                 node_id
                             ));
                         }
@@ -210,7 +210,7 @@ impl ClusterStateManager {
     /// Create a cluster sync message
     pub async fn create_sync_message(&self) -> ClusterSyncMessage {
         let state = self.cluster_state.read().await;
-        
+
         ClusterSyncMessage {
             sender_id: self.local_node_id,
             cluster_state: state.clone(),
@@ -243,7 +243,7 @@ impl ClusterStateManager {
         output.push_str(&format!("Total Nodes: {}\n", stats.total_nodes));
         output.push_str(&format!("Online Nodes: {}\n", stats.online_nodes));
         output.push_str(&format!("Offline Nodes: {}\n", stats.offline_nodes));
-        
+
         if !state.nodes.is_empty() {
             output.push_str("\nNodes:\n");
             for node in state.nodes.values() {
@@ -253,9 +253,9 @@ impl ClusterStateManager {
                     NodeStatus::Connecting => "🟡",
                     NodeStatus::Disconnecting => "🟠",
                 };
-                
+
                 let is_local = if node.node_id == self.local_node_id { " (local)" } else { "" };
-                
+
                 output.push_str(&format!(
                     "  {} {} - {} at {}{}\n",
                     status_icon,
@@ -273,7 +273,7 @@ impl ClusterStateManager {
     /// Format node list for display
     pub async fn format_node_list(&self) -> String {
         let state = self.cluster_state.read().await;
-        
+
         if state.nodes.is_empty() {
             return "No nodes in cluster".to_string();
         }
@@ -286,7 +286,7 @@ impl ClusterStateManager {
         for node in state.nodes.values() {
             let status_str = match node.status {
                 NodeStatus::Online => "Online",
-                NodeStatus::Offline => "Offline", 
+                NodeStatus::Offline => "Offline",
                 NodeStatus::Connecting => "Connecting",
                 NodeStatus::Disconnecting => "Disconnecting",
             };

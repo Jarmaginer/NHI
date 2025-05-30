@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
-use tokio::sync::broadcast;
+
 
 pub struct AttachUI {
     terminal_height: u16,
@@ -20,7 +20,7 @@ pub struct AttachUI {
 impl AttachUI {
     pub fn new() -> io::Result<Self> {
         let (width, height) = terminal::size()?;
-        
+
         Ok(Self {
             terminal_height: height,
             terminal_width: width,
@@ -35,11 +35,11 @@ impl AttachUI {
         // Enter alternate screen and hide cursor
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
         terminal::enable_raw_mode()?;
-        
+
         self.clear_screen()?;
         self.draw_header(instance_id)?;
         self.draw_input_area()?;
-        
+
         Ok(())
     }
 
@@ -47,18 +47,18 @@ impl AttachUI {
         // Restore terminal
         terminal::disable_raw_mode()?;
         execute!(io::stdout(), Show, LeaveAlternateScreen)?;
-        
+
         Ok(())
     }
 
     pub fn add_output_line(&mut self, line: String) -> io::Result<()> {
         self.output_lines.push(line);
-        
+
         // Keep only the last N lines to prevent memory issues
         if self.output_lines.len() > self.max_output_lines * 2 {
             self.output_lines.drain(0..self.max_output_lines);
         }
-        
+
         self.redraw_output()?;
         Ok(())
     }
@@ -144,23 +144,23 @@ impl AttachUI {
             SetForegroundColor(Color::Cyan),
             Print(format!("┌─ Attached to instance: {} ", instance_id)),
         )?;
-        
+
         // Fill the rest of the line with dashes
         let header_len = format!("┌─ Attached to instance: {} ", instance_id).len();
         let remaining = (self.terminal_width as usize).saturating_sub(header_len + 1);
         queue!(io::stdout(), Print("─".repeat(remaining)))?;
         queue!(io::stdout(), Print("┐"))?;
-        
+
         queue!(
             io::stdout(),
             MoveTo(0, 1),
             Print("│ Type 'detach' or Ctrl+C to exit attach mode"),
         )?;
-        
+
         let spaces = (self.terminal_width as usize).saturating_sub(45);
         queue!(io::stdout(), Print(" ".repeat(spaces)))?;
         queue!(io::stdout(), Print("│"))?;
-        
+
         queue!(
             io::stdout(),
             MoveTo(0, 2),
@@ -169,7 +169,7 @@ impl AttachUI {
             Print("┤"),
             ResetColor,
         )?;
-        
+
         io::stdout().flush()?;
         Ok(())
     }
@@ -178,7 +178,7 @@ impl AttachUI {
         let output_start_line = 3;
         let output_end_line = self.terminal_height.saturating_sub(3);
         let available_lines = (output_end_line - output_start_line) as usize;
-        
+
         // Clear output area
         for line in output_start_line..output_end_line {
             queue!(
@@ -190,22 +190,22 @@ impl AttachUI {
                 Print("│"),
             )?;
         }
-        
+
         // Display the last N lines of output
         let start_idx = if self.output_lines.len() > available_lines {
             self.output_lines.len() - available_lines
         } else {
             0
         };
-        
+
         for (i, line) in self.output_lines[start_idx..].iter().enumerate() {
             let y = output_start_line + i as u16;
             if y >= output_end_line {
                 break;
             }
-            
+
             queue!(io::stdout(), MoveTo(2, y))?;
-            
+
             // Truncate line if it's too long
             let max_width = (self.terminal_width as usize).saturating_sub(4);
             let display_line = if line.len() > max_width {
@@ -213,10 +213,10 @@ impl AttachUI {
             } else {
                 line.clone()
             };
-            
+
             queue!(io::stdout(), Print(display_line))?;
         }
-        
+
         io::stdout().flush()?;
         Ok(())
     }
@@ -224,7 +224,7 @@ impl AttachUI {
     fn draw_input_area(&mut self) -> io::Result<()> {
         let input_line = self.terminal_height - 2;
         let bottom_line = self.terminal_height - 1;
-        
+
         // Draw separator
         queue!(
             io::stdout(),
@@ -235,7 +235,7 @@ impl AttachUI {
             Print("┤"),
             ResetColor,
         )?;
-        
+
         // Draw input line
         queue!(
             io::stdout(),
@@ -246,7 +246,7 @@ impl AttachUI {
             Clear(ClearType::UntilNewLine),
             Print(&self.input_buffer),
         )?;
-        
+
         // Draw right border
         queue!(
             io::stdout(),
@@ -255,11 +255,11 @@ impl AttachUI {
             Print("│"),
             ResetColor,
         )?;
-        
+
         // Position cursor
         let cursor_x = 2 + self.cursor_pos as u16;
         queue!(io::stdout(), MoveTo(cursor_x, bottom_line), Show)?;
-        
+
         io::stdout().flush()?;
         Ok(())
     }

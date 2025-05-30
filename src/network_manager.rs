@@ -1,7 +1,7 @@
 use crate::message_protocol::*;
 use anyhow::{Result, Context};
 use bytes::{Buf, BufMut, BytesMut};
-use futures::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
+use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+
 
 /// Codec for encoding/decoding network messages
 pub struct MessageCodec;

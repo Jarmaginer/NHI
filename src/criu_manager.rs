@@ -1,5 +1,5 @@
 use crate::types::{CriuCliError, Result};
-use crate::tty_utils::{detect_tty_environment, generate_criu_tty_args, generate_criu_restore_tty_args, print_tty_analysis};
+use crate::tty_utils::{detect_tty_environment, generate_criu_tty_args, print_tty_analysis};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, error, info, warn};

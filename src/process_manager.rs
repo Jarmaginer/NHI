@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use std::fs::File;

@@ -34,7 +34,7 @@ use cli::{CliCommand, CliState};
 use instance::InstanceManager;
 use process_manager::ProcessManager;
 use criu_manager::CriuManager;
-use types::*;
+
 use ui::AttachUI;
 use uuid::Uuid;
 use colors::ColorScheme;
@@ -46,7 +46,7 @@ use node_manager::NodeManager;
 use shadow_instance_manager::ShadowInstanceManager;
 // Stage 4: Migration imports
 use migration_manager::MigrationManager;
-use crate::logger;
+
 use crate::output::Output;
 
 #[derive(Parser)]
@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
             };
             let dummy_network_manager = Arc::new(NetworkManager::new(dummy_config, dummy_node_id));
 
-            let mut mgr = MigrationManager::new(
+            let mgr = MigrationManager::new(
                 dummy_node_id,
                 dummy_network_manager,
                 instance_manager.clone(),
@@ -660,7 +660,7 @@ async fn execute_command(
             let manager = instance_manager.lock().await;
             if let Ok(uuid) = manager.resolve_instance_id(&instance_id) {
                 if let Some(pid) = process_manager.get_process_pid(&uuid).await {
-                    use crate::tty_utils::{detect_tty_environment, print_tty_analysis, check_process_tty_compatibility};
+                    use crate::tty_utils::check_process_tty_compatibility;
 
                     println!("Analyzing TTY environment for instance {} (PID: {})...", instance_id, pid);
 
@@ -915,7 +915,7 @@ async fn execute_command(
             }
             Ok(false)
         }
-        CliCommand::ShadowView { instance_id } => {
+        CliCommand::ShadowView { instance_id: _ } => {
             println!("{} {}",
                 ColorScheme::info_indicator("Shadow View:"),
                 ColorScheme::info("Shadow view functionality will be implemented after core sync is working")
@@ -929,7 +929,7 @@ async fn enter_attach_mode(
     instance_id: &str,
     uuid: Uuid,
     cli_state: &Arc<Mutex<CliState>>,
-    instance_manager: &Arc<Mutex<InstanceManager>>,
+    _instance_manager: &Arc<Mutex<InstanceManager>>,
     process_manager: &Arc<ProcessManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut ui = AttachUI::new()?;
@@ -1008,7 +1008,7 @@ async fn enter_shadow_attach_mode(
     instance_id: &str,
     uuid: Uuid,
     cli_state: &Arc<Mutex<CliState>>,
-    instance_manager: &Arc<Mutex<InstanceManager>>,
+    _instance_manager: &Arc<Mutex<InstanceManager>>,
     shadow_manager: &Option<Arc<tokio::sync::RwLock<ShadowInstanceManager>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let shadow_mgr = match shadow_manager {

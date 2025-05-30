@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+
 
 /// Discovery events emitted by the discovery service
 #[derive(Debug, Clone)]
