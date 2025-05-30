@@ -48,7 +48,7 @@ impl CriuManager {
         pid: u32,
         checkpoint_name: &str,
         checkpoint_dir: &PathBuf,
-        instance_id: &Uuid,
+        _instance_id: &Uuid,
         output_history: Option<Vec<String>>,
     ) -> Result<PathBuf> {
         // Create checkpoint directory

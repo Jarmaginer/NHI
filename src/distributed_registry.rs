@@ -1,11 +1,10 @@
 use crate::message_protocol::*;
 use crate::types::{Instance, InstanceStatus};
-use anyhow::{Result, Context};
-use chrono::{DateTime, Utc};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Events emitted by the distributed registry

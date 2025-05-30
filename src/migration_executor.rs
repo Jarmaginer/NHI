@@ -1,5 +1,5 @@
 use crate::message_protocol::*;
-use crate::types::{Instance, InstanceStatus};
+use crate::types::InstanceStatus;
 use crate::criu_manager::CriuManager;
 use crate::process_manager::ProcessManager;
 use crate::instance::InstanceManager;
@@ -8,11 +8,10 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio::process::Command;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::fs::File;
-use tracing::{debug, error, info, warn};
+
+use tracing::{error, info, warn};
 use uuid::Uuid;
-use std::path::PathBuf;
+
 
 /// Executes actual instance migration between nodes
 pub struct MigrationExecutor {
@@ -254,7 +253,7 @@ impl MigrationExecutor {
 
     async fn send_checkpoint_to_target(
         &self,
-        target_node_id: NodeId,
+        _target_node_id: NodeId,
         migration_id: Uuid,
         instance_id: Uuid,
         checkpoint_data: Vec<u8>,
@@ -292,9 +291,9 @@ impl MigrationExecutor {
 
     async fn send_migration_complete(
         &self,
-        source_node_id: NodeId,
+        _source_node_id: NodeId,
         migration_id: Uuid,
-        instance_id: Uuid,
+        _instance_id: Uuid,
     ) -> Result<()> {
         if let Some(network_sender) = &self.network_sender {
             let migration_message = MigrationMessage::MigrationComplete {

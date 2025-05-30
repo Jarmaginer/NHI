@@ -2,7 +2,7 @@ use crate::message_protocol::*;
 use crate::types::{Instance, InstanceStatus};
 use crate::instance::InstanceManager;
 use crate::process_manager::ProcessManager;
-use anyhow::{Result, Context};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -326,7 +326,7 @@ impl ShadowInstanceManager {
     }
 
     /// Stream output data from a running instance to all shadow instances
-    pub async fn stream_output_to_shadows(&self, instance_id: Uuid, output_data: Vec<u8>, stream_type: StreamType) -> Result<()> {
+    pub async fn stream_output_to_shadows(&self, instance_id: Uuid, output_data: Vec<u8>, _stream_type: StreamType) -> Result<()> {
         if let Some(network_sender) = &self.network_sender {
             let data_version = self.get_next_data_version(instance_id).await;
             debug!("Streaming output to shadows: {} bytes, version {} for instance {}",
@@ -965,7 +965,7 @@ impl ShadowInstanceManager {
         Err(anyhow::anyhow!("Could not find restored PID - no simple_counter processes running"))
     }
 
-    async fn get_next_data_version(&self, instance_id: Uuid) -> u64 {
+    async fn get_next_data_version(&self, _instance_id: Uuid) -> u64 {
         // For source nodes, we need to track data versions separately
         // since they don't have shadow registry entries for their own instances
         static DATA_VERSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

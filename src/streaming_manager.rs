@@ -8,11 +8,10 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use tokio::sync::{RwLock, mpsc};
 use tokio::process::Command;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
-use tokio::fs::File as AsyncFile;
-use tracing::{debug, error, info, warn};
+
+use tracing::{debug, error, info};
 use uuid::Uuid;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::FromRawFd;
 use std::fs::File;
 
 /// Real-time streaming manager for shadow state synchronization over network
@@ -284,7 +283,7 @@ impl StreamingManager {
         Ok(child)
     }
 
-    async fn create_streaming_checkpoint(&self, pid: u32, temp_dir: &PathBuf) -> Result<Vec<u8>> {
+    async fn create_streaming_checkpoint(&self, pid: u32, _temp_dir: &PathBuf) -> Result<Vec<u8>> {
         // This would integrate with CRIU to create a checkpoint and capture it via streaming
         // For now, return a placeholder
         info!("Creating streaming checkpoint for PID {}", pid);
@@ -315,7 +314,7 @@ impl StreamingManager {
         Ok(())
     }
 
-    async fn get_next_sequence_number(&self, instance_id: Uuid) -> u64 {
+    async fn get_next_sequence_number(&self, _instance_id: Uuid) -> u64 {
         // Simple sequence number generation - in production this should be more sophisticated
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

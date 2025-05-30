@@ -342,9 +342,9 @@ impl ProcessManager {
         &self,
         instance_id: Uuid,
         pid: u32,
-        program: &str,
-        args: &[String],
-        working_dir: &PathBuf,
+        _program: &str,
+        _args: &[String],
+        _working_dir: &PathBuf,
     ) -> Result<()> {
         info!("🔄 [MIGRATE_REG] Registering migrated process: PID {} for instance {}", pid, instance_id);
 
@@ -382,7 +382,7 @@ impl ProcessManager {
             Some(tokio::spawn(async move {
                 // Monitor the output file for changes
                 let mut last_size = 0;
-                let mut file_path = PathBuf::from(&output_file);
+                let file_path = PathBuf::from(&output_file);
 
                 loop {
                     if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
@@ -505,7 +505,7 @@ impl ProcessManager {
         &self,
         instance_id: Uuid,
         pid: u32,
-        restored_history: Option<Vec<String>>,
+        _restored_history: Option<Vec<String>>,
     ) -> Result<()> {
         // For restored processes, we need to attach to the existing process
         // We can't capture stdout/stderr from an already running process easily,
@@ -911,7 +911,7 @@ sleep 0.1
                                     // Check if this process was recently started (within last 10 seconds)
                                     let parts: Vec<&str> = stat_content.split_whitespace().collect();
                                     if parts.len() > 21 {
-                                        if let Ok(starttime) = parts[21].parse::<u64>() {
+                                        if let Ok(_starttime) = parts[21].parse::<u64>() {
                                             // This is a more reliable way to find the actual process
                                             matching_processes.push(pid);
                                             info!("Found candidate process: PID {} with cmdline: {}", pid, cmdline.replace('\0', " "));
