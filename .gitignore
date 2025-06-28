@@ -26,9 +26,9 @@ checkpoints/
 start_detached_*.sh
 instance_*_output.log
 
-# CRIU image streamer build artifacts
-criu-image-streamer/target/
-criu-image-streamer/criu-image-streamer
+# Dependencies build artifacts
+deps/*/target/
+deps/criu-image-streamer/criu-image-streamer
 
 # Test files
 test_*.sh
