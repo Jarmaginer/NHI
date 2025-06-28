@@ -419,7 +419,7 @@ impl ImageSyncManager {
 
             // Use CRIU to create checkpoint
             let mut cmd = Command::new("sudo");
-            cmd.arg("/home/realgod/sync2/criu/criu/criu")
+            cmd.arg("./criu/bin/criu")
                .arg("dump")
                .arg("-t").arg(pid.to_string())
                .arg("-D").arg(&checkpoint_dir)
@@ -1046,7 +1046,7 @@ impl MigrationManager {
 
             // Use CRIU to create checkpoint (stop the process for migration)
             let mut cmd = Command::new("sudo");
-            cmd.arg("/home/realgod/sync2/criu/criu/criu")
+            cmd.arg("./criu/bin/criu")
                .arg("dump")
                .arg("-t").arg(pid.to_string())
                .arg("-D").arg(&checkpoint_dir)

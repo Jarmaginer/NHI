@@ -291,8 +291,16 @@ impl ShadowInstanceManager {
                 }
 
                 if let Some(output_data) = sync_message.output_data {
+                    // Update in-memory buffer
                     shadow_info.output_buffer.extend_from_slice(&output_data);
                     debug!("Updated output buffer for shadow instance {}", instance_id);
+
+                    // Also write to output file for persistence
+                    if let Err(e) = self.append_output_to_file(instance_id, &output_data).await {
+                        warn!("Failed to write shadow output to file for instance {}: {}", instance_id, e);
+                    } else {
+                        debug!("Successfully wrote shadow output to file for instance {}", instance_id);
+                    }
                 }
             }
         } else {
@@ -311,18 +319,28 @@ impl ShadowInstanceManager {
                 }
             }
 
+            let output_buffer = sync_message.output_data.unwrap_or_default();
             let shadow_info = ShadowInstanceInfo {
                 instance_id,
                 source_node_id: sender_id,
                 created_at: sync_message.timestamp,
                 last_sync_time: sync_message.timestamp,
-                output_buffer: sync_message.output_data.unwrap_or_default(),
+                output_buffer: output_buffer.clone(),
                 latest_checkpoint,
                 data_version: sync_message.data_version,
             };
 
             registry.insert(instance_id, shadow_info);
             info!("Created new shadow instance {} from node {}", instance_id, sender_id);
+
+            // If we have output data, write it to file
+            if !output_buffer.is_empty() {
+                if let Err(e) = self.append_output_to_file(instance_id, &output_buffer).await {
+                    warn!("Failed to write initial shadow output to file for instance {}: {}", instance_id, e);
+                } else {
+                    debug!("Successfully wrote initial shadow output to file for instance {}", instance_id);
+                }
+            }
         }
 
         Ok(())
@@ -564,6 +582,41 @@ impl ShadowInstanceManager {
 
     // Private helper methods
 
+    /// Append output data to the shadow instance's output file
+    async fn append_output_to_file(&self, instance_id: Uuid, output_data: &[u8]) -> Result<()> {
+        let instance_short_id = instance_id.to_string()[..8].to_string();
+        let output_file = std::path::PathBuf::from("instances")
+            .join(format!("instance_{}", instance_short_id))
+            .join("output")
+            .join("process_output.log");
+
+        // Ensure the output directory exists
+        if let Some(parent) = output_file.parent() {
+            tokio::fs::create_dir_all(parent).await
+                .context("Failed to create output directory")?;
+        }
+
+        // Append the output data to the file (use OpenOptions for append mode)
+        use tokio::fs::OpenOptions;
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_file)
+            .await
+            .with_context(|| format!("Failed to open output file: {}", output_file.display()))?;
+
+        file.write_all(output_data).await
+            .with_context(|| format!("Failed to write output to file: {}", output_file.display()))?;
+
+        file.flush().await
+            .with_context(|| format!("Failed to flush output file: {}", output_file.display()))?;
+
+        debug!("Appended {} bytes to shadow output file: {}", output_data.len(), output_file.display());
+        Ok(())
+    }
+
     /// Save checkpoint data to disk for a shadow instance
     async fn save_checkpoint_data(&self, instance_id: Uuid, checkpoint_data: &[u8]) -> Result<()> {
         use std::io::Read;
@@ -767,13 +820,19 @@ impl ShadowInstanceManager {
             info!("📄 [RESTORE] Created output file for restored process: {}", output_file.display());
         }
 
-        // Use CRIU to restore the process with verbose output and correct working directory
+        // Create compatible directory structure for file path mapping
+        self.create_compatible_paths(&checkpoint_dir, &instance_dir).await?;
+
+        // Use CRIU to restore the process with the same parameters as local restore
+        let pidfile_path = checkpoint_dir.canonicalize()?.join("restored.pid");
         let mut cmd = Command::new("sudo");
-        cmd.arg("/home/realgod/sync2/criu/criu/criu")
+        cmd.arg("./criu/bin/criu")
            .arg("restore")
            .arg("-D").arg(checkpoint_dir.canonicalize()?)  // Use absolute path
-           .arg("--shell-job")
            .arg("-v4")  // Very verbose output
+           .arg("--restore-detached")  // Critical: restore in detached mode
+           .arg("--shell-job")  // Shell job mode
+           .arg("--pidfile").arg(&pidfile_path)  // Use absolute path for PID file
            .arg("--log-file").arg("/tmp/criu-restore.log")  // Log to file
            .arg("--log-pid")  // Include PID in logs
            .current_dir(instance_dir.canonicalize()?);  // Set working directory to absolute instance directory
@@ -864,14 +923,20 @@ impl ShadowInstanceManager {
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
         info!("🔍 [RESTORE] Looking for restored process PID...");
-        let new_pid = match self.find_restored_pid().await {
-            Ok(pid) => {
-                info!("✅ [RESTORE] Found restored process with PID: {}", pid);
-                pid
-            }
-            Err(e) => {
-                error!("❌ [RESTORE] Failed to find restored PID: {}", e);
-                return Err(e);
+        let new_pid = if let Ok(pid) = self.get_restored_pid_from_file(&checkpoint_dir).await {
+            info!("✅ [RESTORE] Found PID from pidfile: {}", pid);
+            pid
+        } else {
+            info!("🔍 [RESTORE] Pidfile not found, searching for process...");
+            match self.find_restored_pid().await {
+                Ok(pid) => {
+                    info!("✅ [RESTORE] Found restored process with PID: {}", pid);
+                    pid
+                }
+                Err(e) => {
+                    error!("❌ [RESTORE] Failed to find restored PID: {}", e);
+                    return Err(e);
+                }
             }
         };
 
@@ -911,6 +976,91 @@ impl ShadowInstanceManager {
 
         info!("🎉 [RESTORE] Migration completed: instance {} is now running with PID {}", instance_id, new_pid);
         Ok(())
+    }
+
+    /// Create compatible directory structure for file path mapping
+    async fn create_compatible_paths(&self, checkpoint_dir: &std::path::Path, instance_dir: &std::path::Path) -> Result<()> {
+        info!("🔗 [RESTORE] Creating compatible directory structure for migration");
+
+        // Read migration metadata from checkpoint directory
+        let metadata_file = checkpoint_dir.join("migration_metadata.json");
+        if !metadata_file.exists() {
+            info!("ℹ️ [RESTORE] No migration metadata found, skipping path mapping");
+            return Ok(());
+        }
+
+        let metadata_content = tokio::fs::read_to_string(&metadata_file).await?;
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_content)?;
+
+        let source_node_id = metadata["source_node_id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Source node ID not found in migration metadata"))?;
+        let instance_id = metadata["instance_id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Instance ID not found in migration metadata"))?;
+
+        // Create a mapping from source paths to target paths
+        let base_dir = std::path::Path::new("/home/realgod/sync2");
+
+        // Determine source node directory based on node ID
+        let source_node_dir = if source_node_id.starts_with("c5e233c5") {
+            base_dir.join("test_node_a")
+        } else if source_node_id.starts_with("ae7bf5db") {
+            base_dir.join("test_node_b")
+        } else {
+            // Fallback: try to determine from existing directories
+            if base_dir.join("test_node_a").exists() {
+                base_dir.join("test_node_a")
+            } else {
+                base_dir.join("test_node_a") // Create it anyway
+            }
+        };
+
+        // Create the source directory structure if it doesn't exist
+        let source_instance_dir = source_node_dir.join("instances").join(format!("instance_{}", instance_id));
+
+        if !source_instance_dir.exists() {
+            info!("📁 [RESTORE] Creating source directory structure: {}", source_instance_dir.display());
+            tokio::fs::create_dir_all(&source_instance_dir).await?;
+
+            // Create the output directory
+            let source_output_dir = source_instance_dir.join("output");
+            tokio::fs::create_dir_all(&source_output_dir).await?;
+
+            // Create or copy the output file from target to source
+            let target_output_file = instance_dir.join("output").join("process_output.log");
+            let source_output_file = source_output_dir.join("process_output.log");
+
+            if target_output_file.exists() {
+                info!("📄 [RESTORE] Copying output file from target to source location");
+                tokio::fs::copy(&target_output_file, &source_output_file).await?;
+            } else {
+                info!("📄 [RESTORE] Creating empty output file at source location");
+                tokio::fs::File::create(&source_output_file).await?;
+            }
+
+            info!("✅ [RESTORE] Created compatible directory structure");
+        } else {
+            info!("ℹ️ [RESTORE] Source directory structure already exists");
+        }
+
+        Ok(())
+    }
+
+    /// Get restored PID from pidfile (like local restore does)
+    async fn get_restored_pid_from_file(&self, checkpoint_dir: &std::path::Path) -> Result<u32> {
+        let pidfile_path = checkpoint_dir.join("restored.pid");
+
+        if !pidfile_path.exists() {
+            return Err(anyhow::anyhow!("Pidfile does not exist: {}", pidfile_path.display()));
+        }
+
+        let pid_content = tokio::fs::read_to_string(&pidfile_path).await
+            .map_err(|e| anyhow::anyhow!("Failed to read pidfile {}: {}", pidfile_path.display(), e))?;
+
+        let pid = pid_content.trim().parse::<u32>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse PID from pidfile {}: {}", pidfile_path.display(), e))?;
+
+        info!("📄 [RESTORE] Read PID {} from pidfile: {}", pid, pidfile_path.display());
+        Ok(pid)
     }
 
     /// Find the PID of the restored process

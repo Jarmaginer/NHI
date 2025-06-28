@@ -12,7 +12,7 @@ pub struct CriuManager {
 
 impl CriuManager {
     pub fn new() -> Self {
-        let criu_path = PathBuf::from("/home/realgod/sync2/criu/criu/criu");
+        let criu_path = PathBuf::from("./criu/bin/criu");
         let checkpoints_dir = PathBuf::from("instances"); // Use instances directory
 
         // Create instances directory if it doesn't exist

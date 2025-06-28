@@ -1,25 +1,16 @@
-# Rust build artifacts
+# Rust
 /target/
-Cargo.lock
+**/*.rs.bk
+*.pdb
 
-# Instance data and runtime files
-/instances/
-/checkpoints/
-instance_*_output.log
-start_detached_*.sh
-
-# Test and demo files
-demo.sh
-test_nhi.sh
-
-# IDE and editor files
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS generated files
+# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -28,9 +19,27 @@ test_nhi.sh
 ehthumbs.db
 Thumbs.db
 
-# Logs
+# Runtime files
+instances/
+checkpoints/
 *.log
+start_detached_*.sh
+instance_*_output.log
+
+# CRIU image streamer build artifacts
+criu-image-streamer/target/
+criu-image-streamer/criu-image-streamer
+
+# Test files
+test_*.sh
+demo.sh
 
 # Temporary files
 *.tmp
 *.temp
+/tmp/
+
+# Keep CRIU binary but ignore everything else in criu except bin/
+criu/*
+!criu/bin/
+!criu/bin/criu
