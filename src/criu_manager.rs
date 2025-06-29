@@ -12,7 +12,11 @@ pub struct CriuManager {
 
 impl CriuManager {
     pub fn new() -> Self {
-        let criu_path = PathBuf::from("./criu/bin/criu");
+        Self::new_with_path("./criu/bin/criu")
+    }
+
+    pub fn new_with_path<P: AsRef<Path>>(criu_path: P) -> Self {
+        let criu_path = PathBuf::from(criu_path.as_ref());
         let checkpoints_dir = PathBuf::from("instances"); // Use instances directory
 
         // Create instances directory if it doesn't exist
@@ -21,6 +25,21 @@ impl CriuManager {
                 error!("Failed to create instances directory: {}", e);
             }
         }
+
+        // Convert relative path to absolute path to avoid working directory issues
+        let criu_path = if criu_path.is_relative() {
+            match std::env::current_dir() {
+                Ok(current_dir) => current_dir.join(criu_path),
+                Err(e) => {
+                    warn!("Failed to get current directory: {}, using relative path", e);
+                    criu_path
+                }
+            }
+        } else {
+            criu_path
+        };
+
+        info!("Using CRIU binary at: {:?}", criu_path);
 
         Self {
             criu_path,

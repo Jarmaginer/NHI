@@ -60,6 +60,47 @@ sudo ./target/release/nhi --listen-addr 0.0.0.0:8082 --discovery-port 8083
 
 Nodes will automatically discover each other on the same network using UDP broadcast.
 
+## ⚙️ Command Line Options
+
+NHI supports various command line options for configuration:
+
+```bash
+sudo ./target/release/nhi [OPTIONS]
+```
+
+### Available Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listen-addr <ADDR>` | `0.0.0.0:8080` | Network listen address for P2P connections |
+| `--discovery-port <PORT>` | `8081` | UDP port for node discovery |
+| `--node-name <NAME>` | Auto-generated | Custom node name for cluster identification |
+| `--criu-path <PATH>` | `./criu/bin/criu` | Path to CRIU binary executable |
+| `--no-network` | false | Disable networking (Stage 1 compatibility mode) |
+| `--log-level <LEVEL>` | `info` | Logging level (trace, debug, info, warn, error) |
+
+### Examples
+
+**Custom CRIU Path:**
+```bash
+sudo ./target/release/nhi --criu-path /usr/local/bin/criu
+```
+
+**Custom Network Configuration:**
+```bash
+sudo ./target/release/nhi --listen-addr 192.168.1.100:9000 --discovery-port 9001 --node-name production-node-1
+```
+
+**Standalone Mode (No Networking):**
+```bash
+sudo ./target/release/nhi --no-network
+```
+
+**Debug Mode:**
+```bash
+sudo ./target/release/nhi --log-level debug
+```
+
 ## 📖 Usage Guide
 
 ### Starting a Process

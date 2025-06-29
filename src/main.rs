@@ -71,6 +71,10 @@ struct Args {
     /// Disable networking (Stage 1 compatibility mode)
     #[arg(long)]
     no_network: bool,
+
+    /// Path to CRIU binary (default: ./criu/bin/criu)
+    #[arg(long, default_value = "./criu/bin/criu")]
+    criu_path: String,
 }
 
 #[tokio::main]
@@ -89,7 +93,7 @@ async fn main() -> Result<()> {
 
     // Initialize managers
     let process_manager = Arc::new(ProcessManager::new());
-    let criu_manager = Arc::new(CriuManager::new());
+    let criu_manager = Arc::new(CriuManager::new_with_path(&args.criu_path));
     let instance_manager = Arc::new(Mutex::new(InstanceManager::new()));
 
     // Initialize CLI state
@@ -97,10 +101,11 @@ async fn main() -> Result<()> {
 
     // Initialize shadow instance manager (Stage 3)
     let shadow_manager = if !args.no_network {
-        Some(Arc::new(tokio::sync::RwLock::new(ShadowInstanceManager::new(
+        Some(Arc::new(tokio::sync::RwLock::new(ShadowInstanceManager::new_with_criu_path(
             uuid::Uuid::new_v4(), // Will be updated with actual node ID
             instance_manager.clone(),
-            process_manager.clone()
+            process_manager.clone(),
+            &args.criu_path
         ))))
     } else {
         None
@@ -135,7 +140,7 @@ async fn main() -> Result<()> {
                 let node_id = node_manager.node_id();
                 let mut shadow_mgr_write = shadow_mgr.write().await;
                 // Create a new shadow manager with the correct node ID
-                let mut new_shadow_mgr = ShadowInstanceManager::new(node_id, instance_manager.clone(), process_manager.clone());
+                let mut new_shadow_mgr = ShadowInstanceManager::new_with_criu_path(node_id, instance_manager.clone(), process_manager.clone(), &args.criu_path);
 
                 // Set up network sender for shadow manager
                 let network_sender = node_manager.network_manager().get_sender();
@@ -158,11 +163,12 @@ async fn main() -> Result<()> {
     // Initialize migration manager (Stage 4)
     let migration_manager = if !args.no_network {
         if let Some(ref node_mgr) = node_manager {
-            let mut mgr = MigrationManager::new(
+            let mut mgr = MigrationManager::new_with_criu_path(
                 node_mgr.node_id(),
                 node_mgr.network_manager().clone(),
                 instance_manager.clone(),
                 process_manager.clone(),
+                &args.criu_path,
             );
 
             // Set shadow manager if available
@@ -191,11 +197,12 @@ async fn main() -> Result<()> {
             };
             let dummy_network_manager = Arc::new(NetworkManager::new(dummy_config, dummy_node_id));
 
-            let mgr = MigrationManager::new(
+            let mgr = MigrationManager::new_with_criu_path(
                 dummy_node_id,
                 dummy_network_manager,
                 instance_manager.clone(),
                 process_manager.clone(),
+                &args.criu_path,
             );
 
             // Start the migration manager (mainly for checkpoint functionality)

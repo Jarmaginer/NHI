@@ -5,7 +5,7 @@ use crate::process_manager::ProcessManager;
 use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::os::unix::process::ExitStatusExt;
 use tokio::sync::{RwLock, mpsc};
@@ -19,6 +19,7 @@ pub struct ShadowInstanceManager {
     process_manager: Arc<ProcessManager>,
     shadow_registry: Arc<RwLock<HashMap<Uuid, ShadowInstanceInfo>>>,
     network_sender: Option<mpsc::UnboundedSender<NetworkMessage>>,
+    criu_path: PathBuf,
 }
 
 /// Information about a shadow instance
@@ -35,12 +36,37 @@ pub struct ShadowInstanceInfo {
 
 impl ShadowInstanceManager {
     pub fn new(local_node_id: NodeId, instance_manager: Arc<tokio::sync::Mutex<InstanceManager>>, process_manager: Arc<ProcessManager>) -> Self {
+        Self::new_with_criu_path(local_node_id, instance_manager, process_manager, "./criu/bin/criu")
+    }
+
+    pub fn new_with_criu_path<P: AsRef<Path>>(
+        local_node_id: NodeId,
+        instance_manager: Arc<tokio::sync::Mutex<InstanceManager>>,
+        process_manager: Arc<ProcessManager>,
+        criu_path: P
+    ) -> Self {
+        let criu_path = PathBuf::from(criu_path.as_ref());
+
+        // Convert relative path to absolute path to avoid working directory issues
+        let criu_path = if criu_path.is_relative() {
+            match std::env::current_dir() {
+                Ok(current_dir) => current_dir.join(criu_path),
+                Err(e) => {
+                    warn!("Failed to get current directory: {}, using relative path", e);
+                    criu_path
+                }
+            }
+        } else {
+            criu_path
+        };
+
         Self {
             local_node_id,
             instance_manager,
             process_manager,
             shadow_registry: Arc::new(RwLock::new(HashMap::new())),
             network_sender: None,
+            criu_path,
         }
     }
 
@@ -826,7 +852,7 @@ impl ShadowInstanceManager {
         // Use CRIU to restore the process with the same parameters as local restore
         let pidfile_path = checkpoint_dir.canonicalize()?.join("restored.pid");
         let mut cmd = Command::new("sudo");
-        cmd.arg("./criu/bin/criu")
+        cmd.arg(&self.criu_path)
            .arg("restore")
            .arg("-D").arg(checkpoint_dir.canonicalize()?)  // Use absolute path
            .arg("-v4")  // Very verbose output

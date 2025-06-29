@@ -68,6 +68,7 @@ pub struct ImageSyncManager {
     shadow_manager: Option<Arc<RwLock<ShadowInstanceManager>>>,
     sync_interval: Duration,
     is_running: Arc<Mutex<bool>>,
+    criu_path: PathBuf,
 }
 
 impl ImageSyncManager {
@@ -76,6 +77,30 @@ impl ImageSyncManager {
         process_manager: Arc<ProcessManager>,
         sync_interval_secs: u64,
     ) -> Self {
+        Self::new_with_criu_path(instance_manager, process_manager, sync_interval_secs, "./criu/bin/criu")
+    }
+
+    pub fn new_with_criu_path<P: AsRef<std::path::Path>>(
+        instance_manager: Arc<Mutex<InstanceManager>>,
+        process_manager: Arc<ProcessManager>,
+        sync_interval_secs: u64,
+        criu_path: P,
+    ) -> Self {
+        let criu_path = PathBuf::from(criu_path.as_ref());
+
+        // Convert relative path to absolute path to avoid working directory issues
+        let criu_path = if criu_path.is_relative() {
+            match std::env::current_dir() {
+                Ok(current_dir) => current_dir.join(criu_path),
+                Err(e) => {
+                    warn!("Failed to get current directory: {}, using relative path", e);
+                    criu_path
+                }
+            }
+        } else {
+            criu_path
+        };
+
         Self {
             instance_manager,
             process_manager,
@@ -83,6 +108,7 @@ impl ImageSyncManager {
             shadow_manager: None,
             sync_interval: Duration::from_secs(sync_interval_secs),
             is_running: Arc::new(Mutex::new(false)),
+            criu_path,
         }
     }
 
@@ -111,6 +137,7 @@ impl ImageSyncManager {
         let shadow_manager = self.shadow_manager.clone();
         let sync_interval = self.sync_interval;
         let is_running = self.is_running.clone();
+        let criu_path = self.criu_path.clone();
 
         tokio::spawn(async move {
             let mut interval = interval(sync_interval);
@@ -123,6 +150,7 @@ impl ImageSyncManager {
                     &process_manager,
                     network_manager.as_ref(),
                     shadow_manager.as_ref(),
+                    &criu_path,
                 ).await {
                     error!("Failed to sync instances: {}", e);
                 }
@@ -146,6 +174,7 @@ impl ImageSyncManager {
         process_manager: &Arc<ProcessManager>,
         network_manager: Option<&Arc<NetworkManager>>,
         shadow_manager: Option<&Arc<RwLock<ShadowInstanceManager>>>,
+        criu_path: &std::path::Path,
     ) -> Result<()> {
         let instances = {
             let manager = instance_manager.lock().await;
@@ -167,7 +196,7 @@ impl ImageSyncManager {
 
             if is_actually_running {
                 info!("Syncing running instance {}", instance.short_id());
-                if let Err(e) = Self::sync_instance(&instance, process_manager, network_manager, shadow_manager).await {
+                if let Err(e) = Self::sync_instance(&instance, process_manager, network_manager, shadow_manager, criu_path).await {
                     warn!("Failed to sync instance {}: {}", instance.id, e);
                 } else {
                     sync_count += 1;
@@ -401,6 +430,7 @@ impl ImageSyncManager {
         _process_manager: &Arc<ProcessManager>,
         network_manager: Option<&Arc<NetworkManager>>,
         shadow_manager: Option<&Arc<RwLock<ShadowInstanceManager>>>,
+        criu_path: &std::path::Path,
     ) -> Result<()> {
         let checkpoint_name = format!("auto-sync-{}", Utc::now().timestamp());
         info!("Starting sync checkpoint for instance {}: {}", instance.short_id(), checkpoint_name);
@@ -419,7 +449,7 @@ impl ImageSyncManager {
 
             // Use CRIU to create checkpoint
             let mut cmd = Command::new("sudo");
-            cmd.arg("./criu/bin/criu")
+            cmd.arg(criu_path)
                .arg("dump")
                .arg("-t").arg(pid.to_string())
                .arg("-D").arg(&checkpoint_dir)
@@ -536,6 +566,7 @@ impl ImageSyncManager {
             &self.process_manager,
             self.network_manager.as_ref(),
             self.shadow_manager.as_ref(),
+            &self.criu_path,
         ).await?;
 
         info!("Force synced instance {} for migration: {}", instance_id, checkpoint_name);
@@ -554,6 +585,7 @@ pub struct MigrationManager {
     image_sync_manager: ImageSyncManager,
     active_migrations: Arc<RwLock<HashMap<Uuid, ActiveMigration>>>,
     criu_image_streamer_path: PathBuf,
+    criu_path: PathBuf,
 }
 
 impl MigrationManager {
@@ -563,11 +595,37 @@ impl MigrationManager {
         instance_manager: Arc<Mutex<InstanceManager>>,
         process_manager: Arc<ProcessManager>,
     ) -> Self {
-        let image_sync_manager = ImageSyncManager::new(
+        Self::new_with_criu_path(local_node_id, network_manager, instance_manager, process_manager, "./criu/bin/criu")
+    }
+
+    pub fn new_with_criu_path<P: AsRef<std::path::Path>>(
+        local_node_id: NodeId,
+        network_manager: Arc<NetworkManager>,
+        instance_manager: Arc<Mutex<InstanceManager>>,
+        process_manager: Arc<ProcessManager>,
+        criu_path: P,
+    ) -> Self {
+        let image_sync_manager = ImageSyncManager::new_with_criu_path(
             instance_manager.clone(),
             process_manager.clone(),
             30, // 30 seconds sync interval
+            &criu_path,
         );
+
+        let criu_path = PathBuf::from(criu_path.as_ref());
+
+        // Convert relative path to absolute path to avoid working directory issues
+        let criu_path = if criu_path.is_relative() {
+            match std::env::current_dir() {
+                Ok(current_dir) => current_dir.join(criu_path),
+                Err(e) => {
+                    warn!("Failed to get current directory: {}, using relative path", e);
+                    criu_path
+                }
+            }
+        } else {
+            criu_path
+        };
 
         Self {
             local_node_id,
@@ -578,6 +636,7 @@ impl MigrationManager {
             image_sync_manager,
             active_migrations: Arc::new(RwLock::new(HashMap::new())),
             criu_image_streamer_path: PathBuf::from("./criu-image-streamer/target/release/criu-image-streamer"),
+            criu_path,
         }
     }
 
