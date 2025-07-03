@@ -14,6 +14,8 @@ NHI enables seamless live migration of running processes between cluster nodes, 
 - **💻 Interactive CLI**: User-friendly command-line interface for process management
 - **📊 Process Monitoring**: Real-time process status and output monitoring with attach mode
 - **🔄 Instance-based Management**: Persistent instances that survive PID changes during migration
+- **🌐 HTTP API**: RESTful API for remote management and monitoring
+- **💻 Web Frontend**: Modern React-based web interface for system management
 
 ## 🔧 Prerequisites
 
@@ -40,13 +42,26 @@ The setup script will:
 - Build NHI with all dependencies
 - Set up necessary permissions
 
-### 2. Single Node Setup
+### 2. Quick Demo (Recommended)
+
+```bash
+# Start complete demo with backend and frontend
+./start_demo.sh
+
+# This will:
+# - Start NHI backend with HTTP API on port 8082
+# - Start React frontend on port 3000
+# - Open browser to http://localhost:3000
+# - Configure connection in the web interface
+```
+
+### 3. Single Node Setup
 
 ```bash
 sudo ./target/release/nhi
 ```
 
-### 3. Multi-Node Cluster Setup
+### 4. Multi-Node Cluster Setup
 
 **Node A (Primary):**
 ```bash
@@ -78,6 +93,7 @@ sudo ./target/release/nhi [OPTIONS]
 | `--criu-path <PATH>` | `./criu/bin/criu` | Path to CRIU binary executable |
 | `--no-network` | false | Disable networking (Stage 1 compatibility mode) |
 | `--log-level <LEVEL>` | `info` | Logging level (trace, debug, info, warn, error) |
+| `--http-port <PORT>` | None | Enable HTTP API server on specified port |
 
 ### Examples
 
@@ -99,6 +115,21 @@ sudo ./target/release/nhi --no-network
 **Debug Mode:**
 ```bash
 sudo ./target/release/nhi --log-level debug
+```
+
+**HTTP API Mode:**
+```bash
+sudo ./target/release/nhi --http-port 8082
+```
+
+**Complete Setup with HTTP API:**
+```bash
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8080 \
+  --discovery-port 8081 \
+  --node-name "node-a" \
+  --criu-path "/home/realgod/sync2/nhi2/NHI/criu/bin/criu" \
+  --http-port 4000
 ```
 
 ## 📖 Usage Guide
@@ -134,6 +165,35 @@ nhi> attach <instance_id>
 ```bash
 nhi> cluster list-nodes  # Show all connected nodes
 nhi> cluster status      # Show cluster health
+```
+
+### HTTP API Usage
+```bash
+# Start NHI with HTTP API enabled
+sudo ./target/release/nhi --http-port 8082
+
+# API Endpoints
+curl http://localhost:8082/api/status          # Get system status
+curl http://localhost:8082/api/logs            # Get system logs
+curl http://localhost:8082/api/cpu             # Get CPU usage
+curl http://localhost:8082/api/memory          # Get memory usage
+
+# Execute commands via API
+curl -X POST http://localhost:8082/api/execute \
+  -H "Content-Type: text/plain" \
+  -d "list"
+```
+
+### Web Frontend
+```bash
+# Start the web frontend
+cd front
+npm install
+npm start
+
+# Access the web interface
+# Open http://localhost:3000 in your browser
+# Configure connection to NHI backend in the connection panel
 ```
 
 ## � 完整演示指南
@@ -363,6 +423,8 @@ nhi> stop ec754fcd
 - **👥 Shadow Instance Manager** (`shadow_instance_manager.rs`): Maintains synchronized shadow copies
 - **📦 Image Sync Manager**: Handles checkpoint data synchronization
 - **🌐 Network Manager** (`network_manager.rs`): Manages inter-node communication
+- **🌐 HTTP API Server** (`http_api.rs`): RESTful API for remote management
+- **💻 Web Frontend** (`front/`): React-based web interface
 
 ### Instance Management System
 
@@ -433,7 +495,14 @@ NHI/
 │       └── criu                     # Pre-compiled CRIU binary
 ├── examples/
 │   └── simple_counter               # C++ test program
+├── front/                           # Web frontend
+│   ├── src/                         # React source code
+│   ├── public/                      # Static assets
+│   ├── package.json                 # Frontend dependencies
+│   └── README.md                    # Frontend documentation
 ├── setup.sh                        # Installation script
+├── start_demo.sh                    # Demo startup script
+├── stop_demo.sh                     # Demo stop script
 ├── Cargo.toml                       # Project configuration
 └── .gitignore                       # Git ignore rules
 ```
@@ -627,11 +696,84 @@ For issues and questions:
 4. Test with the provided `simple_counter` example program
 5. Verify network connectivity between nodes
 
-## 🎯 Future Roadmap
+## � Complete Demo Setup
+
+### Full System Demo with Web Interface
+
+**1. Start Complete Demo Environment**
+```bash
+# Quick start with both backend and frontend
+./start_demo.sh
+
+# This automatically:
+# - Starts NHI backend with HTTP API on port 8082
+# - Starts React frontend on port 3000
+# - Opens browser to http://localhost:3000
+```
+
+**2. Manual Setup for Advanced Configuration**
+```bash
+# Start NHI backend with full configuration
+sudo /home/realgod/sync2/nhi2/NHI/target/release/nhi \
+  --listen-addr 0.0.0.0:8083 \
+  --discovery-port 8081 \
+  --node-name "node-a" \
+  --criu-path "/home/realgod/sync2/nhi2/NHI/criu/bin/criu" \
+  --http-port 4000
+
+# In another terminal, start the frontend
+cd front
+npm install
+npm start
+```
+
+**3. Web Interface Configuration**
+1. Open http://localhost:3000 in your browser
+2. Configure NODE_1 connection:
+   - Host: `localhost`
+   - Port: `4000` (or your chosen HTTP port)
+   - Click "连接" (Connect)
+3. Configure NODE_2 connection (optional):
+   - Host: `192.168.1.100` (or second server IP)
+   - Port: `8083` (or second server port)
+   - Click "连接" (Connect)
+
+**4. Demo Features**
+- **Real-time Monitoring**: CPU, memory, network status
+- **Process Management**: Start, migrate, reset processes
+- **Live Migration**: Visual vehicle-to-vehicle migration
+- **Command Execution**: Direct NHI command execution
+- **Dual Node Support**: Monitor multiple NHI instances
+
+### Multi-Node Cluster Demo
+
+**Node A (Primary with Web Interface)**
+```bash
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8080 \
+  --discovery-port 8081 \
+  --node-name "demo-node-a" \
+  --http-port 8082
+```
+
+**Node B (Secondary)**
+```bash
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8082 \
+  --discovery-port 8083 \
+  --node-name "demo-node-b" \
+  --http-port 8084
+```
+
+**Frontend Configuration**
+- NODE_1: `localhost:8082` (Primary node)
+- NODE_2: `localhost:8084` (Secondary node)
+
+## �🎯 Future Roadmap
 
 - **Performance Optimization**: Reduce migration time and checkpoint size
 - **Security**: Add authentication and encryption for inter-node communication
 - **Monitoring**: Enhanced metrics and monitoring capabilities
 - **Load Balancing**: Automatic load balancing based on resource usage
-- **Web Interface**: Web-based management interface
 - **Container Support**: Docker container migration support
+- **Mobile Interface**: Native mobile application for monitoring
