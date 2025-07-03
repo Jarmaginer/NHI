@@ -19,6 +19,8 @@ chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.27", features = ["signal", "process"] }
 crossterm = "0.27"
 colored = "2.0"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
 
 # Networking dependencies for Stage 2
 tokio-util = { version = "0.7", features = ["codec"] }

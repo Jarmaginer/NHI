@@ -91,6 +91,7 @@ impl CriuManager {
                 if env.is_complex {
                     warn!("Complex TTY environment detected for PID {}. CRIU may have issues.", pid);
                     warn!("Consider using 'start-detached' for better CRIU compatibility.");
+                    warn!("The detached mode now uses proper daemon wrapper for CRIU compatibility.");
                 }
                 Some(env)
             }
@@ -122,7 +123,7 @@ impl CriuManager {
         // Build CRIU dump command with TTY arguments
         let mut cmd = Command::new(&self.criu_path);
         cmd.arg("dump")
-            .arg("-t")
+            .arg("--tree")
             .arg(pid.to_string())
             .arg("-D")
             .arg(&checkpoint_dir)

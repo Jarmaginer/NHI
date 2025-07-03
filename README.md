@@ -136,7 +136,224 @@ nhi> cluster list-nodes  # Show all connected nodes
 nhi> cluster status      # Show cluster health
 ```
 
-## 🏗️ Architecture
+## � 完整演示指南
+
+### 📋 前置准备
+
+#### 1. 环境要求
+```bash
+# 检查系统要求
+uname -a  # Linux系统
+whoami    # 需要sudo权限
+```
+
+#### 2. 构建项目
+```bash
+# 进入项目目录
+cd /path/to/NHI
+
+# 运行设置脚本
+chmod +x setup.sh
+./setup.sh
+
+# 或者手动构建
+cargo build --release
+chmod +x criu/bin/criu
+```
+
+#### 3. 验证CRIU
+```bash
+# 检查CRIU版本
+./criu/bin/criu --version
+
+# 检查CRIU功能
+sudo ./criu/bin/criu check
+```
+
+### 🚀 基础演示流程
+
+#### 步骤1: 启动单节点NHI系统
+
+```bash
+# 基础启动（默认配置）
+sudo ./target/release/nhi
+
+# 完整参数启动
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8080 \
+  --discovery-port 8081 \
+  --node-name "demo-node-1" \
+  --log-level info
+
+# 无网络模式（单机测试）
+sudo ./target/release/nhi --no-network
+```
+
+**启动参数说明：**
+- `--listen-addr`: TCP监听地址，用于节点间通信（默认：0.0.0.0:8080）
+- `--discovery-port`: UDP发现端口，用于自动节点发现（默认：8081）
+- `--node-name`: 节点名称，用于集群标识（默认：自动生成）
+- `--log-level`: 日志级别（debug/info/warn/error，默认：info）
+- `--no-network`: 禁用网络功能，单机模式
+
+#### 步骤2: 基本命令演示
+
+```bash
+# 在NHI CLI中执行以下命令：
+
+# 1. 查看帮助
+nhi> help
+
+# 2. 查看当前实例
+nhi> list
+
+# 3. 启动一个测试进程（CRIU优化模式）
+nhi> start-detached ./examples/simple_counter
+
+# 4. 再次查看实例列表
+nhi> list
+
+# 5. 查看进程输出
+nhi> logs ec754fcd  # 使用实际的实例ID
+
+# 6. 进入交互模式查看实时输出
+nhi> attach ec754fcd
+
+# 7. 退出交互模式
+nhi [ec754fcd]> detach
+```
+
+#### 步骤3: 检查点和恢复演示
+
+```bash
+# 1. 创建检查点
+nhi> checkpoint ec754fcd checkpoint-1
+
+# 2. 停止进程
+nhi> stop ec754fcd
+
+# 3. 从检查点恢复
+nhi> restore ec754fcd checkpoint-1
+
+# 4. 验证恢复成功
+nhi> list
+nhi> logs ec754fcd
+```
+
+#### 步骤4: TTY兼容性分析
+
+```bash
+# 分析进程的CRIU兼容性
+nhi> analyze-tty ec754fcd
+
+# 或使用别名
+nhi> tty ec754fcd
+```
+
+### 🌐 分布式集群演示
+
+#### 步骤1: 启动第一个节点（Node A）
+
+```bash
+# 终端1 - 启动主节点
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8080 \
+  --discovery-port 8081 \
+  --node-name "node-a"
+```
+
+#### 步骤2: 启动第二个节点（Node B）
+
+```bash
+# 终端2 - 启动从节点
+sudo ./target/release/nhi \
+  --listen-addr 0.0.0.0:8082 \
+  --discovery-port 8083 \
+  --node-name "node-b"
+```
+
+#### 步骤3: 集群管理演示
+
+```bash
+# 在Node A中执行：
+
+# 1. 查看集群节点
+nhi> cluster list-nodes
+
+# 2. 查看集群状态
+nhi> cluster status
+
+# 3. 查看本地节点信息
+nhi> cluster node-info
+
+# 4. 手动连接到另一个节点（如果自动发现失败）
+nhi> cluster connect 127.0.0.1:8082
+```
+
+#### 步骤4: 进程迁移演示
+
+```bash
+# 在Node A中执行：
+
+# 1. 启动一个进程
+nhi> start-detached ./examples/simple_counter
+
+# 2. 查看实例（应该显示为Running状态）
+nhi> list
+
+# 3. 获取Node B的ID
+nhi> cluster list-nodes
+# 记录Node B的ID，例如：b1234567-...
+
+# 4. 执行迁移
+nhi> migrate ec754fcd b1234567-8901-2345-6789-abcdef123456
+
+# 5. 验证迁移结果
+nhi> list  # 应该显示为Shadow状态
+
+# 在Node B中验证：
+nhi> list  # 应该显示为Running状态
+```
+
+### 🔧 高级功能演示
+
+#### 1. 影子实例管理
+
+```bash
+# 查看影子实例
+nhi> shadow-view ec754fcd
+
+# 连接到影子实例
+nhi> attach ec754fcd  # 在拥有影子实例的节点上
+```
+
+#### 2. 输出监控
+
+```bash
+# 查看最近20行输出
+nhi> logs ec754fcd
+
+# 查看最近50行输出
+nhi> logs ec754fcd 50
+
+# 实时监控输出
+nhi> attach ec754fcd
+```
+
+#### 3. 进程生命周期管理
+
+```bash
+# 暂停进程
+nhi> pause ec754fcd
+
+# 恢复进程
+nhi> resume ec754fcd
+
+# 停止进程
+nhi> stop ec754fcd
+```
+
+## �🏗️ Architecture
 
 ### Core Components
 
@@ -315,12 +532,27 @@ netstat -tulpn | grep 808
 
 ### CRIU Command Line Usage
 ```bash
-# Checkpoint (dump) process
-./criu/bin/criu dump -t <pid> -D <images_dir> --restore-detached --external 'tty[rdev:dev]'
+# Checkpoint (dump) process - Updated with proper parameters
+./criu/bin/criu dump --tree <pid> -D <images_dir> --leave-running --shell-job -v4
 
-# Restore process
-./criu/bin/criu restore -D <images_dir> --restore-detached --inherit-fd 'fd[1]:tty[rdev:dev]'
+# Restore process - Updated with proper parameters
+./criu/bin/criu restore -D <images_dir> --restore-detached --shell-job -v4
 ```
+
+### CRIU Migration Improvements
+
+**🎯 Key Fixes Applied:**
+- **True Daemon Wrapper**: Added `daemon_wrapper.c` for proper process daemonization
+- **Correct CRIU Parameters**: Using `--tree` instead of `-t` and `--shell-job` for session handling
+- **TTY Independence**: Processes are now completely detached from TTY using double fork technique
+- **Automatic Building**: Daemon wrapper is automatically compiled during build process
+
+**🚀 Enhanced Detached Mode:**
+The `start-detached` command now uses a proper daemon wrapper that:
+- Performs double fork for complete TTY detachment
+- Creates independent session with `setsid()`
+- Redirects all file descriptors properly
+- Ensures CRIU compatibility with `--shell-job` parameter
 
 ### Instance Directory Structure
 ```

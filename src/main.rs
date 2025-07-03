@@ -29,6 +29,7 @@ mod migration_executor;
 mod shadow_instance_manager;
 mod logger;
 mod output;
+mod http_api;
 
 use cli::{CliCommand, CliState};
 use instance::InstanceManager;
@@ -75,6 +76,10 @@ struct Args {
     /// Path to CRIU binary (default: ./criu/bin/criu)
     #[arg(long, default_value = "./criu/bin/criu")]
     criu_path: String,
+
+    /// HTTP API port (default: 3000, 0 to disable)
+    #[arg(long, default_value = "3000")]
+    http_port: u16,
 }
 
 #[tokio::main]
@@ -228,6 +233,28 @@ async fn main() -> Result<()> {
         node_mgr.set_migration_manager(migration_mgr.clone()).await;
     }
 
+    // Start HTTP API server if enabled
+    if args.http_port > 0 {
+        let api_state = http_api::ApiState {
+            cli_state: cli_state.clone(),
+            instance_manager: instance_manager.clone(),
+            process_manager: process_manager.clone(),
+            criu_manager: criu_manager.clone(),
+            node_manager: node_manager.clone(),
+            shadow_manager: shadow_manager.clone(),
+            migration_manager: migration_manager.clone(),
+        };
+
+        let http_port = args.http_port;
+        tokio::spawn(async move {
+            if let Err(e) = http_api::start_http_server(api_state, http_port).await {
+                error!("HTTP API server error: {}", e);
+            }
+        });
+    } else {
+        Output::info("HTTP API disabled (port set to 0)");
+    }
+
     // Create readline editor
     let mut rl = DefaultEditor::new()?;
 
@@ -361,7 +388,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn execute_command(
+pub async fn execute_command(
     input: &str,
     cli_state: &Arc<Mutex<CliState>>,
     instance_manager: &Arc<Mutex<InstanceManager>>,

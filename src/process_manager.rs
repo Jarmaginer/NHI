@@ -2,7 +2,7 @@ use crate::types::{CriuCliError, ProcessInfo, Result, StartMode};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -675,27 +675,78 @@ impl ProcessManager {
         // Create a shell script that will start the process in a completely detached way
         let script_path = working_dir.join(format!("start_detached_{}.sh", instance_id.to_string()[..8].to_string()));
 
+        // Use our daemon wrapper for true daemonization
+        let daemon_wrapper_path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("target")
+            .join("daemon_wrapper");
+
+        // Use pure Rust daemonization instead of C wrapper
+        info!("Using Rust-native daemonization for better integration");
+
+        // Convert program path to absolute path if it's relative
+        let absolute_program_path = if Path::new(program).is_absolute() {
+            program.to_string()
+        } else {
+            working_dir.join(program).display().to_string()
+        };
+
+        // Create a Rust-based daemon launcher script
         let script_content = format!(
             r#"#!/bin/bash
 
+# Detailed logging for debugging
+LOGFILE="instances/instance_{}/logs/daemon_startup.log"
+mkdir -p "$(dirname "$LOGFILE")"
+echo "$(date): Starting daemon process for {}" >> "$LOGFILE"
+
 # Kill any existing processes with the same name
+echo "$(date): Killing existing processes" >> "$LOGFILE"
 pkill -f "{}" || true
 
 # Change to working directory
+echo "$(date): Changing to working directory: {}" >> "$LOGFILE"
 cd "{}"
 
-# Start the program with redirected I/O
-{} {} </dev/null >"{}" 2>&1 &
+# Start process with proper daemonization using nohup and setsid
+echo "$(date): Starting daemon process: {}" >> "$LOGFILE"
+echo "$(date): Output file: {}" >> "$LOGFILE"
+echo "$(date): Arguments: {}" >> "$LOGFILE"
 
-# Wait a moment and exit
-sleep 0.1
+# Use nohup and setsid for proper daemonization
+nohup setsid "{}" {} </dev/null >"{}" 2>&1 &
+DAEMON_PID=$!
+
+echo "$(date): Daemon started with PID: $DAEMON_PID" >> "$LOGFILE"
+
+# Wait for daemon creation to complete
+sleep 1
+
+# Verify the process is running
+if ps -p $DAEMON_PID > /dev/null 2>&1; then
+    echo "$(date): Daemon process verified running" >> "$LOGFILE"
+else
+    echo "$(date): ERROR: Daemon process not running!" >> "$LOGFILE"
+fi
 "#,
+            instance_id.to_string()[..8].to_string(),
+            program,
             program,
             working_dir.display(),
-            program,
+            working_dir.display(),
+            absolute_program_path,
+            output_file.display(),
+            args.join(" "),
+            absolute_program_path,
             args.join(" "),
             output_file.display()
         );
+
+        // Create logs directory for this instance
+        let logs_dir = working_dir.join("instances").join(format!("instance_{}", instance_id.to_string()[..8].to_string())).join("logs");
+        if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+            warn!("Failed to create logs directory {:?}: {}", logs_dir, e);
+        }
 
         // Write the script
         info!("Creating detached start script at: {:?}", script_path);
@@ -764,7 +815,15 @@ sleep 0.1
         }
 
         let pid = pid.ok_or_else(|| {
-            CriuCliError::ProcessError(format!("Failed to find PID for detached process: {} after 5 attempts", program))
+            // Read the daemon startup log for debugging
+            let log_file = working_dir.join("instances").join(format!("instance_{}", instance_id.to_string()[..8].to_string())).join("logs").join("daemon_startup.log");
+            if let Ok(log_content) = std::fs::read_to_string(&log_file) {
+                error!("Daemon startup log content:\n{}", log_content);
+            } else {
+                error!("Could not read daemon startup log at {:?}", log_file);
+            }
+
+            CriuCliError::ProcessError(format!("Failed to find PID for detached process: {} after 5 attempts. Check daemon startup log for details.", program))
         })?;
 
         info!("Started detached process {} with PID: {}", program, pid);

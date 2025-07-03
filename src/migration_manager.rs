@@ -348,9 +348,8 @@ impl ImageSyncManager {
         info!("Restoring migrated instance {} from checkpoint {}", instance_id, checkpoint_name);
 
         // Use CRIU to restore the process
-        let criu_path = "/usr/local/bin/criu"; // Default CRIU path
         let restore_cmd = std::process::Command::new("sudo")
-            .arg(criu_path)
+            .arg(&self.criu_path)
             .arg("restore")
             .arg("-D")
             .arg(&checkpoint_dir)
@@ -451,7 +450,7 @@ impl ImageSyncManager {
             let mut cmd = Command::new("sudo");
             cmd.arg(criu_path)
                .arg("dump")
-               .arg("-t").arg(pid.to_string())
+               .arg("--tree").arg(pid.to_string())
                .arg("-D").arg(&checkpoint_dir)
                .arg("--shell-job")
                .arg("--leave-running");
@@ -595,7 +594,8 @@ impl MigrationManager {
         instance_manager: Arc<Mutex<InstanceManager>>,
         process_manager: Arc<ProcessManager>,
     ) -> Self {
-        Self::new_with_criu_path(local_node_id, network_manager, instance_manager, process_manager, "./criu/bin/criu")
+        // Use a default path that will be converted to absolute
+        Self::new_with_criu_path(local_node_id, network_manager, instance_manager, process_manager, "/usr/local/bin/criu")
     }
 
     pub fn new_with_criu_path<P: AsRef<std::path::Path>>(
@@ -1105,9 +1105,9 @@ impl MigrationManager {
 
             // Use CRIU to create checkpoint (stop the process for migration)
             let mut cmd = Command::new("sudo");
-            cmd.arg("./criu/bin/criu")
+            cmd.arg(&self.criu_path)
                .arg("dump")
-               .arg("-t").arg(pid.to_string())
+               .arg("--tree").arg(pid.to_string())
                .arg("-D").arg(&checkpoint_dir)
                .arg("--shell-job");
 
